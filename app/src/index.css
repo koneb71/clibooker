@@ -1,0 +1,171 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Monaco, monospace;
+
+  --color-bg: var(--c-bg);
+  --color-panel: var(--c-panel);
+  --color-raised: var(--c-raised);
+  --color-sidebar: var(--c-sidebar);
+  --color-hover: var(--c-hover);
+  --color-active: var(--c-active);
+  --color-fg: var(--c-fg);
+  --color-muted: var(--c-muted);
+  --color-faint: var(--c-faint);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+  --color-accent: var(--c-accent);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-accent-fg: var(--c-accent-fg);
+  --color-ok: var(--c-ok);
+  --color-ok-soft: var(--c-ok-soft);
+  --color-warn: var(--c-warn);
+  --color-err: var(--c-err);
+  --color-err-soft: var(--c-err-soft);
+  --color-term: var(--c-term);
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+}
+
+:root {
+  --c-bg: #ffffff;
+  --c-panel: #f7f7f8;
+  --c-raised: #ffffff;
+  --c-sidebar: rgb(240 240 242 / 0.72);
+  --c-hover: rgb(0 0 0 / 0.045);
+  --c-active: rgb(0 0 0 / 0.075);
+  --c-fg: #1d1d1f;
+  --c-muted: #6e6e73;
+  --c-faint: #a1a1a6;
+  --c-line: rgb(0 0 0 / 0.08);
+  --c-line-strong: rgb(0 0 0 / 0.14);
+  --c-accent: #b4690e;
+  --c-accent-soft: rgb(214 140 30 / 0.13);
+  --c-accent-fg: #ffffff;
+  --c-ok: #1f9d55;
+  --c-ok-soft: rgb(31 157 85 / 0.12);
+  --c-warn: #c27c0e;
+  --c-err: #d63b30;
+  --c-err-soft: rgb(214 59 48 / 0.1);
+  --c-term: #fbfbfc;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --c-bg: #1e1e20;
+  --c-panel: #19191b;
+  --c-raised: #2a2a2d;
+  --c-sidebar: rgb(30 30 32 / 0.55);
+  --c-hover: rgb(255 255 255 / 0.055);
+  --c-active: rgb(255 255 255 / 0.09);
+  --c-fg: #ececee;
+  --c-muted: #9b9ba1;
+  --c-faint: #66666c;
+  --c-line: rgb(255 255 255 / 0.08);
+  --c-line-strong: rgb(255 255 255 / 0.14);
+  --c-accent: #f0b54a;
+  --c-accent-soft: rgb(240 181 74 / 0.14);
+  --c-accent-fg: #1d1606;
+  --c-ok: #3ccf7f;
+  --c-ok-soft: rgb(60 207 127 / 0.13);
+  --c-warn: #e8a93a;
+  --c-err: #ff6b5f;
+  --c-err-soft: rgb(255 107 95 / 0.12);
+  --c-term: #141416;
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* Transparent so the native sidebar vibrancy shows through; panes paint their own background. */
+  background: transparent;
+  color: var(--c-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  overflow: hidden;
+}
+
+/* Browser preview (no native vibrancy): give the page a background. */
+html:not(.tauri) body {
+  background: var(--c-panel);
+}
+
+input,
+textarea,
+select,
+[contenteditable],
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+button {
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}
+/* Text fields draw their own focus ring. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[cmdk-list]:focus-visible,
+.xterm *:focus-visible {
+  outline: none;
+}
+
+::selection {
+  background: var(--c-accent-soft);
+}
+
+/* Thin native-ish scrollbars */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-line-strong) transparent;
+}
+
+.xterm {
+  height: 100%;
+}
+.xterm .xterm-viewport,
+.xterm .xterm-screen {
+  background-color: transparent;
+}
+.xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-line-strong) transparent;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-dot {
+    animation: none;
+  }
+}

@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/bk-core", "crates/bk-cli", "app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/koneb71/clibooker"
+homepage = "https://github.com/koneb71/clibooker"
+authors = ["Neiell Care L. Paradiang"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
+
+# Stripping proc-macro dylibs breaks them on this toolchain ("mis-aligned LINKEDIT string pool").
+[profile.release.build-override]
+strip = false
