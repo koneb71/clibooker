@@ -5,6 +5,7 @@
 use std::io::Read;
 use std::net::TcpListener;
 use std::process::{Child, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bk_core::env::EnvMap;
@@ -22,13 +23,31 @@ pub struct ForwardInfo {
 }
 
 pub struct Tunnels {
-    children: Vec<Child>,
+    /// Each running tunnel with the tail of its ssh error output.
+    children: Vec<(Child, Arc<Mutex<String>>)>,
     pub info: Vec<ForwardInfo>,
 }
 
 impl Tunnels {
     pub fn none() -> Self {
         Tunnels { children: Vec::new(), info: Vec::new() }
+    }
+
+    /// Whether each tunnel's ssh is still up, and what it last said (for diagnostics).
+    #[cfg(all(test, unix))]
+    pub fn describe(&mut self) -> String {
+        self.children
+            .iter_mut()
+            .map(|(c, log)| {
+                let state = match c.try_wait() {
+                    Ok(None) => "running".to_string(),
+                    Ok(Some(st)) => format!("exited ({st})"),
+                    Err(e) => format!("unknown ({e})"),
+                };
+                format!("tunnel {state}: {}", log.lock().map(|l| l.trim().to_string()).unwrap_or_default())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn open(program: &str, target: &Target, forwards: &[String], paths: &Paths, env: &EnvMap) -> Self {
@@ -53,10 +72,13 @@ impl Tunnels {
                 .stderr(Stdio::piped())
                 .spawn();
             match spawned {
-                Ok(mut child) => match wait_for_failure(&mut child, Duration::from_millis(1500)) {
-                    Some(err) => info.error = Some(err),
-                    None => t.children.push(child),
-                },
+                Ok(mut child) => {
+                    let log = Arc::new(Mutex::new(String::new()));
+                    match wait_for_failure(&mut child, Duration::from_millis(1500), &log) {
+                        Some(err) => info.error = Some(err),
+                        None => t.children.push((child, log)),
+                    }
+                }
                 Err(e) => info.error = Some(format!("couldn't start ssh: {e}")),
             }
             t.info.push(info);
@@ -65,7 +87,7 @@ impl Tunnels {
     }
 
     pub fn close(&mut self) {
-        for c in &mut self.children {
+        for (c, _) in &mut self.children {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -80,7 +102,7 @@ impl Drop for Tunnels {
 }
 
 /// `ExitOnForwardFailure` makes ssh exit quickly when the forward can't be set up.
-fn wait_for_failure(child: &mut Child, within: Duration) -> Option<String> {
+fn wait_for_failure(child: &mut Child, within: Duration, log: &Arc<Mutex<String>>) -> Option<String> {
     let start = Instant::now();
     while start.elapsed() < within {
         if let Ok(Some(_)) = child.try_wait() {
@@ -98,11 +120,24 @@ fn wait_for_failure(child: &mut Child, within: Duration) -> Option<String> {
         std::thread::sleep(Duration::from_millis(50));
     }
     // Still running: the forward is up. Keep draining stderr (e.g. "connect failed" before
-    // the remote service starts) so the pipe never fills or breaks.
+    // the remote service starts) so the pipe never fills or breaks, keeping its tail.
     if let Some(mut e) = child.stderr.take() {
+        let log = log.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 1024];
-            while matches!(e.read(&mut buf), Ok(n) if n > 0) {}
+            while let Ok(n) = e.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut l) = log.lock() {
+                    l.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if l.len() > 4096 {
+                        let cut = l.len() - 2048;
+                        let cut = (cut..l.len()).find(|&i| l.is_char_boundary(i)).unwrap_or(l.len());
+                        l.drain(..cut);
+                    }
+                }
+            }
         });
     }
     None

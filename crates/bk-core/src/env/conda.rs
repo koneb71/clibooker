@@ -201,7 +201,7 @@ fn activation_command(base: &Path, target: &str) -> std::process::Command {
 
 #[cfg(windows)]
 fn parse_activated(stdout: &[u8]) -> EnvMap {
-    let units: Vec<u16> = stdout.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = stdout.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     super::parse_set_output(&String::from_utf16_lossy(&units))
 }
 

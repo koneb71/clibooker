@@ -52,13 +52,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          find_id() {
-            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1
-          }
-          id=$(find_id)
+          # Reuse this version's release if there is one (e.g. re-running a build).
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
           if [ -z "$id" ]; then
-            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "Clibooker $TAG" --generate-notes
-            id=$(find_id)
+            # Take the id from the response: the release list can lag behind a new draft.
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" -f name="Clibooker $TAG" \
+              -F draft=true -F generate_release_notes=true --jq .id)
+          fi
+          if [ -z "$id" ]; then
+            echo "::error::couldn't create or find the release for $TAG"
+            exit 1
           fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
 

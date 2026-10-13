@@ -1291,6 +1291,11 @@ mod ssh_e2e {
         );
         let info = c.start(&mgr, Spawn::remote(&plan, &c.paths));
         assert!(info.forwards[0].error.is_none(), "{:?}", info.forwards);
+        // Wait for the server to come up (a cold login shell and Python can be slow on CI).
+        let t0 = Instant::now();
+        while !output(&mgr, &info.id).contains("Serving HTTP") && t0.elapsed() < Duration::from_secs(40) {
+            std::thread::sleep(Duration::from_millis(300));
+        }
         let mut body = String::new();
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_secs(15) {
@@ -1304,7 +1309,13 @@ mod ssh_e2e {
             }
             std::thread::sleep(Duration::from_millis(300));
         }
-        assert!(body.contains("tunnel-ok"), "got {body:?}");
+        assert!(
+            body.contains("tunnel-ok"),
+            "got {body:?}; run: {:?}\n{}\noutput:\n{}",
+            mgr.list().into_iter().find(|r| r.id == info.id),
+            mgr.get(&info.id).unwrap().tunnels.lock().unwrap().describe(),
+            output(&mgr, &info.id)
+        );
         mgr.stop(&info.id).unwrap();
         wait_done(&mgr, &info.id, 15);
         // The tunnel closes with the run.

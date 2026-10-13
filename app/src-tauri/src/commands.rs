@@ -587,7 +587,7 @@ fn read_user_path() -> anyhow::Result<(String, winreg::enums::RegType)> {
     let env = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment")?;
     match env.get_raw_value("Path") {
         Ok(v) => {
-            let units: Vec<u16> = v.bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = v.bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
             Ok((String::from_utf16_lossy(&units).trim_end_matches('\0').to_string(), v.vtype))
         }
         Err(_) => Ok((String::new(), REG_EXPAND_SZ)),
