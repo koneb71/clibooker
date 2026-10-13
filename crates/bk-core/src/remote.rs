@@ -492,7 +492,12 @@ pub fn scan_scripts(b: &Batch, dir: &str) -> Result<RemoteScripts> {
 /// `server:path` (for `bk scan gpu:~/proj`), when the prefix names a server.
 pub fn split_server_path<'a>(spec: &'a str, servers_: &BTreeMap<String, Server>) -> Option<(&'a str, &'a str)> {
     let (server, path) = spec.split_once(':')?;
-    if server.is_empty() || server.contains('/') {
+    if server.is_empty() || server.contains(['/', '\\']) {
+        return None;
+    }
+    // `C:\proj` / `C:/proj` is a Windows drive, not a server named C.
+    let drive = cfg!(windows) && server.len() == 1 && server.chars().all(|c| c.is_ascii_alphabetic());
+    if drive && (path.is_empty() || path.starts_with(['\\', '/'])) {
         return None;
     }
     let known = servers_.contains_key(server)
@@ -630,7 +635,7 @@ pub fn session_args(target: &Target, paths: &Paths) -> Vec<String> {
     servers::ssh_args(target, Purpose::Interactive, paths)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::model::{Bookmark, Step};

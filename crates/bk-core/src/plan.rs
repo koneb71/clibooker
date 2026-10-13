@@ -3,17 +3,18 @@
 //! Both front ends execute the same plan: the CLI with inherited stdio, the desktop app in a PTY.
 
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::env::{self, Activated, EnvMap, Mode};
 use crate::model::Settings;
 use crate::paths;
+use crate::shell::{self, ShellKind};
 use crate::store::Entry;
 use crate::template;
 
@@ -28,7 +29,7 @@ pub struct RunRequest {
     pub default_cwd: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannedStep {
     pub label: String,
     pub command: String,
@@ -45,6 +46,7 @@ pub struct RunPlan {
     pub cwd: PathBuf,
     pub shell: PathBuf,
     pub shell_args: Vec<String>,
+    pub shell_kind: ShellKind,
     pub env: EnvMap,
     pub env_label: String,
     pub env_description: String,
@@ -54,12 +56,35 @@ pub struct RunPlan {
 }
 
 impl RunPlan {
-    /// argv for one step: `<shell> <shell_args...> <command>`.
+    /// argv for one step: `<shell> <shell_args...> <command>` (PowerShell gets it encoded).
     pub fn argv(&self, step: &PlannedStep) -> Vec<OsString> {
         let mut v = vec![self.shell.clone().into_os_string()];
         v.extend(self.shell_args.iter().map(OsString::from));
-        v.push(step.command.clone().into());
+        v.push(shell::command_arg(self.shell_kind, &step.command));
         v
+    }
+
+    /// A process that runs one step: its shell, folder and the plan's env (nothing inherited).
+    pub fn step_process(&self, step: &PlannedStep) -> std::process::Command {
+        shell::step_process(&self.shell, &self.shell_args, self.shell_kind, &step.command, &step.cwd, &self.env)
+    }
+
+    /// The dim first line of a run: name · folder · env.
+    pub fn title(&self) -> String {
+        format!("{} · {} · {}", self.name, paths::contract_tilde(&self.cwd), self.env_description)
+    }
+
+    /// What `bk __run` needs, minus the env (the runner inherits it, so `.env` values never
+    /// touch disk).
+    pub fn steps_file(&self, state_file: Option<PathBuf>) -> StepsFile {
+        StepsFile {
+            shell: self.shell.clone(),
+            shell_args: self.shell_args.clone(),
+            shell_kind: self.shell_kind,
+            title: self.title(),
+            steps: self.steps.clone(),
+            state_file,
+        }
     }
 
     pub fn summary(&self) -> PlanSummary {
@@ -73,6 +98,18 @@ impl RunPlan {
             steps: self.steps.clone(),
         }
     }
+}
+
+/// Input for `bk __run` (the desktop app's step runner on Windows).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepsFile {
+    pub shell: PathBuf,
+    pub shell_args: Vec<String>,
+    pub shell_kind: ShellKind,
+    pub title: String,
+    pub steps: Vec<PlannedStep>,
+    /// Progress lines (`step;N`, `exit;N;C`, `done;C`) are appended here.
+    pub state_file: Option<PathBuf>,
 }
 
 /// Serializable view of a plan (for dry-run and the UI). Never contains env values.
@@ -122,16 +159,20 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
         let iter = dotenvy::from_path_iter(&path).with_context(|| format!("reading dotenv file {}", path.display()))?;
         for item in iter {
             let (k, v) = item.with_context(|| format!("parsing {}", path.display()))?;
-            env.insert(k.into(), v.into());
+            env::set(&mut env, k, v);
         }
     }
     for (k, v) in &b.vars {
         let v = expand_vars(v, &env);
-        env.insert(k.into(), v.into());
+        env::set(&mut env, k.as_str(), v);
     }
     for (k, v) in &req.overrides {
-        env.insert(k.into(), v.into());
+        env::set(&mut env, k.as_str(), v);
     }
+
+    let shell_name = b.shell.clone().or_else(|| settings.shell.clone()).unwrap_or_else(|| default_shell(base));
+    let (shell, shell_args) = resolve_shell(&shell_name, &env)?;
+    let shell_kind = ShellKind::of(&shell);
 
     let values = &req.params;
     let mut steps: Vec<PlannedStep> = pre_steps
@@ -151,7 +192,7 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
         if i == last && !req.extra_args.is_empty() {
             for a in &req.extra_args {
                 command.push(' ');
-                command.push_str(&shell_escape::unix::escape(a.into()));
+                command.push_str(&shell_kind.quote(a));
             }
         }
         let step_cwd = match &s.cwd {
@@ -168,8 +209,6 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
         });
     }
 
-    let shell_name = b.shell.clone().or_else(|| settings.shell.clone()).unwrap_or_else(|| default_shell(base));
-    let (shell, shell_args) = resolve_shell(&shell_name, &env)?;
     let env_changes = env_diff(base, &env);
     let mut params = values.clone();
     for p in template::bookmark_params(b) {
@@ -184,6 +223,7 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
         cwd,
         shell,
         shell_args,
+        shell_kind,
         env,
         env_label,
         env_description: description,
@@ -193,38 +233,14 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
     })
 }
 
-/// `$SHELL` if it is zsh or bash, else `sh`.
+/// See [`shell::default_shell`].
 pub fn default_shell(env: &EnvMap) -> String {
-    let shell = env::get_string(env, "SHELL").unwrap_or_default();
-    let name = Path::new(&shell).file_name().and_then(OsStr::to_str).unwrap_or("");
-    match name {
-        "zsh" | "bash" => name.to_string(),
-        _ => "sh".to_string(),
-    }
+    shell::default_shell(env)
 }
 
-/// Resolve a shell name/path and the flags that make it skip rc files.
+/// See [`shell::resolve`].
 pub fn resolve_shell(name: &str, env: &EnvMap) -> Result<(PathBuf, Vec<String>)> {
-    let path = if name.contains('/') {
-        paths::expand_tilde(name)
-    } else {
-        env::which_in(env, name)
-            .or_else(|| {
-                ["/bin", "/usr/bin", "/opt/homebrew/bin"].iter().map(|d| Path::new(d).join(name)).find(|p| p.exists())
-            })
-            .with_context(|| format!("shell `{name}` not found"))?
-    };
-    if !path.exists() {
-        bail!("shell {} not found", path.display());
-    }
-    let base = path.file_name().and_then(OsStr::to_str).unwrap_or("");
-    let args: &[&str] = match base {
-        "zsh" => &["-f", "-c"],
-        "bash" => &["--noprofile", "--norc", "-c"],
-        "fish" => &["--no-config", "-c"],
-        _ => &["-c"],
-    };
-    Ok((path, args.iter().map(|s| s.to_string()).collect()))
+    shell::resolve(name, env)
 }
 
 static VAR_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid regex"));
@@ -242,10 +258,10 @@ pub fn env_diff(before: &EnvMap, after: &EnvMap) -> Vec<String> {
         match before.get(k) {
             None => out.push(format!("+{key}")),
             Some(old) if old != v => {
-                if key == "PATH" {
+                if k.is("PATH") {
                     let old_entries: Vec<PathBuf> = std::env::split_paths(old).collect();
                     let added: Vec<String> = std::env::split_paths(v)
-                        .filter(|p| !old_entries.contains(p))
+                        .filter(|p| !old_entries.iter().any(|o| paths::same_path(o, p)))
                         .map(|p| paths::contract_tilde(&p))
                         .collect();
                     if added.is_empty() {
@@ -261,7 +277,7 @@ pub fn env_diff(before: &EnvMap, after: &EnvMap) -> Vec<String> {
         }
     }
     for k in before.keys() {
-        if !after.contains_key(k) && !k.as_encoded_bytes().starts_with(b"BK_") {
+        if !after.contains_key(k) && !k.starts_with("BK_") {
             out.push(format!("-{}", k.to_string_lossy()));
         }
     }
@@ -273,6 +289,7 @@ mod tests {
     use super::*;
     use crate::model::{Bookmark, EnvSpec, Step};
     use crate::store::Scope;
+    use std::path::Path;
 
     fn entry(b: Bookmark, dir: &Path) -> Entry {
         let mut e = Entry::new("t", Scope::Global, &dir.join("b.toml"), b);
@@ -281,12 +298,17 @@ mod tests {
     }
 
     fn base() -> EnvMap {
-        [
-            ("PATH".into(), OsString::from("/usr/bin:/bin")),
-            ("SHELL".into(), "/bin/zsh".into()),
-            ("VIRTUAL_ENV".into(), "/old".into()),
-        ]
-        .into()
+        env::from_pairs([
+            ("PATH", std::env::join_paths(["/usr/bin", "/bin"]).unwrap()),
+            ("SHELL", "/bin/sh".into()),
+            ("VIRTUAL_ENV", "/old".into()),
+        ])
+    }
+
+    fn path_prefix(dirs: &[&Path]) -> String {
+        let mut s = std::env::join_paths(dirs).unwrap().into_string().unwrap();
+        s.push(if cfg!(windows) { ';' } else { ':' });
+        s
     }
 
     #[test]
@@ -310,7 +332,7 @@ mod tests {
         assert_eq!(plan.steps[0].command, "echo 1");
         assert_eq!(plan.steps[1].command, "npm run dev --port '80 80'");
         assert_eq!(plan.steps[1].cwd, d.path().join("web"));
-        assert_eq!(plan.shell_args, vec!["-f", "-c"]);
+        assert_eq!(plan.shell_args, shell::flags(&plan.shell));
         assert_eq!(plan.params["script"], "dev");
         // Inherit keeps the caller's env.
         assert_eq!(env::get_string(&plan.env, "VIRTUAL_ENV").unwrap(), "/old");
@@ -330,7 +352,8 @@ mod tests {
     fn layering_venv_dotenv_vars_overrides() {
         let d = tempfile::tempdir().unwrap();
         let v = d.path().join(".venv");
-        std::fs::create_dir_all(v.join("bin")).unwrap();
+        let bin = v.join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(v.join("pyvenv.cfg"), "").unwrap();
         std::fs::write(d.path().join(".env"), "SECRET=s3\nMODE=from-dotenv\n").unwrap();
         let b = Bookmark {
@@ -345,7 +368,7 @@ mod tests {
         let plan = build(&entry(b, d.path()), &req, &base(), &Settings::default(), Mode::Run).unwrap();
         let get = |k| env::get_string(&plan.env, k).unwrap();
         assert_eq!(get("VIRTUAL_ENV"), v.display().to_string());
-        assert!(get("PATH").starts_with(&format!("{}/bin:", v.display())));
+        assert!(get("PATH").starts_with(&path_prefix(&[&bin])), "{}", get("PATH"));
         assert_eq!(get("MODE"), "from-vars");
         assert_eq!(get("P"), "s3:x");
         assert_eq!(get("Z"), "1");
@@ -353,11 +376,13 @@ mod tests {
         assert!(plan.env_changes.iter().all(|c| !c.contains("s3")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtimes_and_extra_path_come_first() {
         let d = tempfile::tempdir().unwrap();
         let nvm = d.path().join("nvm");
         std::fs::create_dir_all(nvm.join("versions/node/v22.14.0/bin")).unwrap();
+        std::fs::write(nvm.join("versions/node/v22.14.0/bin/node"), "").unwrap();
         std::fs::create_dir_all(d.path().join("vendor/bin")).unwrap();
         let b = Bookmark {
             command: Some("node -v".into()),
@@ -370,8 +395,7 @@ mod tests {
         base.insert("NVM_DIR".into(), nvm.clone().into_os_string());
         let plan = build(&entry(b, d.path()), &RunRequest::default(), &base, &Settings::default(), Mode::Run).unwrap();
         let path = env::get_string(&plan.env, "PATH").unwrap();
-        let expected =
-            format!("{}:{}:", d.path().join("vendor/bin").display(), nvm.join("versions/node/v22.14.0/bin").display());
+        let expected = path_prefix(&[&d.path().join("vendor/bin"), &nvm.join("versions/node/v22.14.0/bin")]);
         assert!(path.starts_with(&expected), "{path}");
         assert_eq!(plan.env_label, "node 22.14.0");
         assert!(plan.env_description.contains("node 22.14.0 (nvm)"), "{}", plan.env_description);

@@ -2,12 +2,14 @@
 // Lets the layout be developed and checked without the native shell.
 
 import { emitLocal, type OutputSink } from "./api";
+import { platform } from "./platform";
 import type { Bookmark, Entry, Library, Param, RunInfo, RunRecord, Settings, Step } from "./types";
 
 const GLOBAL = "~/.config/bk/bookmarks.toml";
 const PROJECT = "~/work/fastcap/.bk.toml";
 
 const now = Date.now();
+const mockPlatform = platform;
 const books: Record<string, { file: string; bookmark: Bookmark }> = {
   train: {
     file: GLOBAL,
@@ -137,6 +139,10 @@ function library(): Library {
     errors: [],
     global_file: GLOBAL,
     home: "/Users/you",
+    platform: mockPlatform,
+    default_hotkey: mockPlatform === "macos" ? "Alt+Space" : "Ctrl+Alt+Space",
+    default_terminal: { macos: "terminal", windows: "windows-terminal", linux: "auto" }[mockPlatform],
+    shell: { macos: "zsh", windows: "powershell", linux: "bash" }[mockPlatform],
     projects: [{ file: PROJECT, dir: "~/work/fastcap", name: "fastcap" }],
   };
 }

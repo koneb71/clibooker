@@ -322,8 +322,13 @@ pub enum Purpose {
     Tunnel,
 }
 
+/// Whether background ssh calls share one connection (ControlMaster). Windows' OpenSSH has no
+/// connection sharing, so there every call opens its own connection.
+pub const MULTIPLEX: bool = cfg!(unix);
+
 /// Directory for ControlMaster sockets; falls back to /tmp when the path would exceed
 /// macOS's 104-byte socket limit.
+#[cfg(unix)]
 pub fn control_dir(paths: &Paths) -> PathBuf {
     let preferred = paths.data_dir.join("ssh");
     // %C expands to 40 hex chars.
@@ -339,6 +344,7 @@ pub fn control_dir(paths: &Paths) -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "getuid"]
     fn libc_getuid() -> u32;
@@ -356,26 +362,36 @@ pub fn ssh_args(t: &Target, purpose: Purpose, paths: &Paths) -> Vec<String> {
         opt("ServerAliveCountMax", "4");
     }
     for (k, v) in &t.options {
+        // Only Apple's ssh knows UseKeychain; others refuse to start with it.
+        if k.eq_ignore_ascii_case("UseKeychain") && !cfg!(target_os = "macos") {
+            continue;
+        }
         opt(k, v);
     }
     match purpose {
         Purpose::Interactive => a.push("-tt".into()),
         Purpose::Batch => {
             a.push("-T".into());
-            for (k, v) in [
-                ("BatchMode", "yes".to_string()),
-                ("ConnectTimeout", "6".to_string()),
+            #[cfg_attr(not(unix), allow(unused_mut))]
+            let mut o = vec![("BatchMode", "yes".to_string()), ("ConnectTimeout", "6".to_string())];
+            #[cfg(unix)]
+            o.extend([
                 ("ControlMaster", "auto".to_string()),
                 ("ControlPath", control_dir(paths).join("%C").display().to_string()),
                 ("ControlPersist", "60".to_string()),
-            ] {
+            ]);
+            #[cfg(not(unix))]
+            let _ = paths;
+            for (k, v) in o {
                 a.push("-o".into());
                 a.push(format!("{k}={v}"));
             }
         }
         Purpose::Tunnel => {
             a.extend(["-N".into(), "-T".into(), "-o".into(), "ExitOnForwardFailure=yes".into()]);
-            a.extend(["-o".into(), "ControlMaster=no".into(), "-S".into(), "none".into()]);
+            if MULTIPLEX {
+                a.extend(["-o".into(), "ControlMaster=no".into(), "-S".into(), "none".into()]);
+            }
         }
     }
     if let Some(p) = t.port {
@@ -393,13 +409,22 @@ pub fn ssh_args(t: &Target, purpose: Purpose, paths: &Paths) -> Vec<String> {
     a
 }
 
-/// The ssh binary: settings, else /usr/bin/ssh (macOS's understands UseKeychain), else PATH.
+/// The ssh binary: settings, else the system's (/usr/bin/ssh, which on macOS understands
+/// UseKeychain; Windows' built-in OpenSSH), else whatever `ssh` is on PATH.
 pub fn ssh_program(setting: Option<&str>) -> String {
-    match setting.filter(|s| !s.trim().is_empty()) {
-        Some(s) => paths::expand_tilde(s).display().to_string(),
-        None if Path::new("/usr/bin/ssh").exists() => "/usr/bin/ssh".into(),
-        None => "ssh".into(),
+    if let Some(s) = setting.filter(|s| !s.trim().is_empty()) {
+        return paths::expand_tilde(s).display().to_string();
     }
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let p = Path::new(&root).join("System32").join("OpenSSH").join("ssh.exe");
+        if p.exists() {
+            return p.display().to_string();
+        }
+    } else if Path::new("/usr/bin/ssh").exists() {
+        return "/usr/bin/ssh".into();
+    }
+    "ssh".into()
 }
 
 /// Environment for the local ssh process: just what ssh needs. `LC_*` is dropped because
@@ -418,11 +443,23 @@ pub fn ssh_env(base: &EnvMap) -> EnvMap {
         "DISPLAY",
         "SSH_ASKPASS",
         "SSH_ASKPASS_REQUIRE",
+        // Windows: without these ssh.exe can't find its config, keys, agent or even start Winsock.
+        "SystemRoot",
+        "windir",
+        "SystemDrive",
+        "USERPROFILE",
+        "USERNAME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "ProgramData",
+        "PATHEXT",
+        "ComSpec",
+        "TEMP",
+        "TMP",
     ];
-    base.iter()
-        .filter(|(k, _)| KEEP.iter().any(|keep| k.as_os_str() == *keep))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+    base.iter().filter(|(k, _)| KEEP.iter().any(|keep| k.is(keep))).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
 // ---------- batch execution over the shared connection ----------
@@ -443,7 +480,7 @@ pub struct BatchOutput {
 
 impl Batch<'_> {
     fn command(&self, remote: &str) -> Command {
-        let mut c = Command::new(&self.program);
+        let mut c = crate::proc::background(&self.program);
         c.args(ssh_args(self.target, Purpose::Batch, self.paths));
         c.arg(remote);
         c.env_clear().envs(&self.env);
@@ -762,7 +799,7 @@ pub fn fetch_folder(b: &Batch, dir: &str, names: &[&str]) -> Result<RemoteFiles>
 
 /// Resolved `hostname` and `port` for a target, via `ssh -G` (handles ssh-config aliases).
 pub fn resolved_host(program: &str, t: &Target, env: &EnvMap) -> Option<(String, u16)> {
-    let mut c = Command::new(program);
+    let mut c = crate::proc::background(program);
     c.arg("-G");
     if let Some(p) = t.port {
         c.args(["-p", &p.to_string()]);
@@ -776,7 +813,7 @@ pub fn resolved_host(program: &str, t: &Target, env: &EnvMap) -> Option<(String,
 /// Fingerprints of the server's host keys (for the "Trust host" dialog).
 pub fn host_fingerprints(program: &str, t: &Target, env: &EnvMap) -> Result<Vec<String>> {
     let (host, port) = resolved_host(program, t, env).context("could not resolve the host name")?;
-    let keys = Command::new("ssh-keyscan")
+    let keys = crate::proc::background("ssh-keyscan")
         .args(["-T", "6", "-p", &port.to_string(), "--", &host])
         .stderr(Stdio::null())
         .output()
@@ -784,7 +821,7 @@ pub fn host_fingerprints(program: &str, t: &Target, env: &EnvMap) -> Result<Vec<
     if keys.stdout.is_empty() {
         bail!("couldn't fetch host keys from {host}:{port}");
     }
-    let mut child = Command::new("ssh-keygen")
+    let mut child = crate::proc::background("ssh-keygen")
         .args(["-l", "-f", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -866,9 +903,11 @@ mod tests {
         assert!(s.contains("-o IdentitiesOnly=yes -J me@b.example:22 -- ubuntu@10.0.0.5"), "{s}");
         assert_eq!(a.last().unwrap(), "ubuntu@10.0.0.5");
         let b = ssh_args(&t, Purpose::Batch, &paths).join(" ");
-        assert!(b.contains("-T -o BatchMode=yes") && b.contains("ControlMaster=auto"), "{b}");
+        assert!(b.contains("-T -o BatchMode=yes"), "{b}");
+        assert_eq!(b.contains("ControlMaster=auto"), MULTIPLEX, "{b}");
         let tun = ssh_args(&t, Purpose::Tunnel, &paths).join(" ");
-        assert!(tun.contains("-N -T -o ExitOnForwardFailure=yes -o ControlMaster=no -S none"), "{tun}");
+        assert!(tun.contains("-N -T -o ExitOnForwardFailure=yes"), "{tun}");
+        assert_eq!(tun.contains("-o ControlMaster=no -S none"), MULTIPLEX, "{tun}");
         let lit = resolve_target("deploy@web1.example:2200", &BTreeMap::new()).unwrap();
         assert_eq!((lit.destination.as_str(), lit.port), ("deploy@web1.example", Some(2200)));
         assert!(resolve_target("-oProxyCommand=x", &BTreeMap::new()).is_err());
@@ -933,6 +972,7 @@ rt\tgo\tgo1.22.3\t/usr/local/go\tsystem\nrt\tjava\tcurrent\t/x\tsdkman\n";
         assert!(!inv.runtimes.contains_key("java"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn probe_script_is_valid_sh() {
         let st = Command::new("/bin/sh").args(["-n", "-c", PROBE_SCRIPT]).status().unwrap();

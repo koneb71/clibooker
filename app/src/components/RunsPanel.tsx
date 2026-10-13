@@ -14,6 +14,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useLibrary } from "../lib/queries";
+import { isMac, kbd } from "../lib/platform";
 import type { RunInfo } from "../lib/types";
 import { cn, duration } from "../lib/utils";
 import { useRuns } from "../stores/runs";
@@ -159,7 +160,7 @@ export function RunsPanel() {
             {current.status === "running" ? (
               <IconButton
                 label={current.kind === "session" ? "Disconnect" : "Stop"}
-                shortcut={current.kind === "session" ? undefined : "⌃C in terminal"}
+                shortcut={current.kind === "session" ? undefined : `${isMac ? "⌃C" : "Ctrl+C"} in terminal`}
                 onClick={() => void api.stopRun(current.id)}
               >
                 <Square size={13} fill="currentColor" />
@@ -183,7 +184,7 @@ export function RunsPanel() {
             </IconButton>
           </div>
         )}
-        <IconButton label={panelOpen ? "Hide panel" : "Show panel"} shortcut="⌘J" onClick={() => setPanelOpen(!panelOpen)}>
+        <IconButton label={panelOpen ? "Hide panel" : "Show panel"} shortcut={kbd("Mod+J")} onClick={() => setPanelOpen(!panelOpen)}>
           {panelOpen ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
         </IconButton>
       </div>

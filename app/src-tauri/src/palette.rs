@@ -9,7 +9,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use crate::state::AppState;
 
-pub const DEFAULT_HOTKEY: &str = "Alt+Space";
+/// Alt+Space opens the window menu on Windows and GNOME, so other platforms add Ctrl.
+pub const DEFAULT_HOTKEY: &str = if cfg!(target_os = "macos") { "Alt+Space" } else { "Ctrl+Alt+Space" };
 
 pub fn plugin<R: Runtime>() -> TauriPlugin<R> {
     tauri_plugin_global_shortcut::Builder::new()

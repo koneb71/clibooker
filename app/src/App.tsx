@@ -10,6 +10,7 @@ import { RunsPanel } from "./components/RunsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { Button, Kbd, TooltipProvider } from "./components/ui";
 import { api, on, pickFolder } from "./lib/api";
+import { isMac, isMod, kbd } from "./lib/platform";
 import { keys, useBackendInvalidation, useEntry, useLibrary } from "./lib/queries";
 import { requestRun } from "./lib/run";
 import type { RunInfo } from "./lib/types";
@@ -22,15 +23,17 @@ import { SettingsView } from "./views/SettingsView";
 
 function EmptyDetail() {
   const newBookmark = useUi((s) => s.newBookmark);
+  const { data: lib } = useLibrary();
+  const hotkey = lib?.settings.hotkey ?? lib?.default_hotkey ?? (isMac ? "Alt+Space" : "Ctrl+Alt+Space");
   const tips = [
-    { icon: <BookmarkPlus size={15} />, text: "Create a bookmark", keys: "⌘N" },
+    { icon: <BookmarkPlus size={15} />, text: "Create a bookmark", keys: kbd("Mod+N") },
     { icon: <MousePointerClick size={15} />, text: "Double-click a bookmark to run it", keys: "↩" },
-    { icon: <Command size={15} />, text: "Quick run from any app", keys: "⌥ Space" },
+    { icon: <Command size={15} />, text: "Quick run from any app", keys: kbd(hotkey) },
     { icon: <Terminal size={15} />, text: "In a terminal: bk save NAME saves the last command", keys: "" },
   ];
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-bg">
-      <div data-tauri-drag-region className="h-[52px] shrink-0" />
+      {isMac && <div data-tauri-drag-region className="h-[52px] shrink-0" />}
       <div className="flex flex-1 flex-col items-center justify-center gap-6 px-8 pb-16">
         <div className="flex flex-col gap-2.5">
           {tips.map((t) => (
@@ -104,7 +107,9 @@ export function MainApp() {
   // Global shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey)) return;
+      if (!isMod(e)) return;
+      // Off macOS the shortcuts are Ctrl+…, which a focused terminal needs for itself.
+      if (!isMac && (e.target as Element | null)?.closest?.(".xterm")) return;
       if (e.key === "n") {
         e.preventDefault();
         newBookmark();

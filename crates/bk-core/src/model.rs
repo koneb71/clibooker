@@ -336,6 +336,9 @@ pub struct Settings {
     pub launch_at_login: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_in_dock: Option<bool>,
+    /// Keep the app running in the menu bar / tray when its window is closed (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_running: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_font_size: Option<u16>,
     /// ssh binary (default /usr/bin/ssh, which understands macOS `UseKeychain`).

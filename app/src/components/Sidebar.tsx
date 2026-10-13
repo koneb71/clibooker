@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { allTags, useLibrary, useServers, useServerStatus } from "../lib/queries";
 import type { ServerInfo } from "../lib/types";
 import { ReachDot } from "../views/ServerView";
+import { isMac } from "../lib/platform";
 import { cn } from "../lib/utils";
 import { useRuns } from "../stores/runs";
 import { type Filter, type View, useUi } from "../stores/ui";
@@ -109,8 +110,8 @@ export function Sidebar({ onAddProject }: { onAddProject: () => void }) {
 
   return (
     <nav className="flex h-full w-[212px] shrink-0 flex-col bg-sidebar">
-      {/* Space for the traffic lights; also a drag handle for the window. */}
-      <div data-tauri-drag-region className="h-[52px] shrink-0" />
+      {/* Space for macOS's traffic lights; also a drag handle for the window. */}
+      <div data-tauri-drag-region className={isMac ? "h-[52px] shrink-0" : "h-2.5 shrink-0"} />
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2.5 pb-3">
         <Item icon={<Layers size={15} />} label="All bookmarks" count={entries.length} {...nav({ kind: "all" })} />
         <Item

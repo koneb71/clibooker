@@ -1,5 +1,7 @@
 mod commands;
 mod external_term;
+#[cfg(windows)]
+mod job;
 mod markers;
 mod palette;
 mod runs;
@@ -45,10 +47,27 @@ pub fn request_quit(app: &AppHandle) {
         });
 }
 
+/// `Clibooker --palette` opens the quick-run palette (for desktops where global shortcuts
+/// don't work, e.g. Wayland: bind a system shortcut to this command).
+fn wants_palette<S: AsRef<str>>(args: &[S]) -> bool {
+    args.iter().any(|a| a.as_ref() == "--palette")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK's DMA-BUF renderer shows a blank window on many NVIDIA setups.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+        && std::path::Path::new("/proc/driver/nvidia/version").exists()
+    {
+        // SAFETY: still single-threaded; nothing else reads the environment yet.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| palette::show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if wants_palette(&args) { palette::toggle(app) } else { palette::show_main(app) }
+        }))
         .plugin(tauri_plugin_window_state::Builder::default().with_denylist(&["palette"]).build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -78,7 +97,9 @@ pub fn run() {
                 Err(e) => eprintln!("file watcher unavailable: {e}"),
             }
 
-            tray::create(app.handle())?;
+            if let Err(e) = tray::create(app.handle()) {
+                eprintln!("no tray icon ({e}); closing the window will quit");
+            }
             for event in ["library-changed", "history-changed", "run-updated"] {
                 let h = app.handle().clone();
                 app.listen_any(event, move |_| tray::refresh(&h));
@@ -94,13 +115,22 @@ pub fn run() {
             if settings.show_in_dock == Some(false) {
                 let _ = app.handle().set_dock_visibility(false);
             }
+            if wants_palette(&std::env::args().collect::<Vec<_>>()) {
+                palette::toggle(app.handle());
+            }
             Ok(())
         })
         .on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
-                // Keep running in the menu bar; runs continue in the background.
                 api.prevent_close();
-                let _ = window.hide();
+                let app = window.app_handle();
+                let keep = app.state::<AppState>().library().settings.keep_running.unwrap_or(true);
+                if keep && tray::available() {
+                    // Keep running in the menu bar / tray; runs continue in the background.
+                    let _ = window.hide();
+                } else {
+                    request_quit(app);
+                }
             }
             WindowEvent::Focused(false) if window.label() == "palette" => {
                 let _ = window.hide();

@@ -1,3 +1,6 @@
+//! End-to-end CLI tests with POSIX shell steps (Windows has its own in `windows.rs`).
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
@@ -28,6 +31,8 @@ impl Sandbox {
             .env("BK_DATA_DIR", self.path().join("data"))
             .env_remove("VIRTUAL_ENV")
             .env_remove("CONDA_DEFAULT_ENV")
+            // Steps run in /bin/sh whatever the machine's login shell is.
+            .env("SHELL", "/bin/sh")
             .env("NO_COLOR", "1")
             .current_dir(self.path());
         c
@@ -273,8 +278,12 @@ fn edit_with_scripted_editor() {
     s.add(&["e", "echo before"]);
     // A fake $EDITOR that rewrites the command and renames the bookmark.
     let script = s.path().join("ed.sh");
-    std::fs::write(&script, "#!/bin/sh\nsed -i '' -e 's/before/after/' -e 's/bookmarks.e]/bookmarks.e2]/' \"$1\"\n")
-        .unwrap();
+    // (`sed -i` differs between BSD and GNU, so write a copy and move it back.)
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nsed -e 's/before/after/' -e 's/bookmarks.e]/bookmarks.e2]/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n",
+    )
+    .unwrap();
     std::process::Command::new("chmod").arg("+x").arg(&script).status().unwrap();
     s.bk().args(["edit", "e"]).env("VISUAL", &script).assert().success();
     s.bk().arg("e2").assert().success().stdout("after\n");

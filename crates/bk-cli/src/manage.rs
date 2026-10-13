@@ -19,18 +19,67 @@ fn open_editor(path: &Path) -> Result<()> {
         .ok()
         .filter(|v| !v.is_empty())
         .or_else(|| std::env::var("EDITOR").ok().filter(|v| !v.is_empty()))
-        .unwrap_or_else(|| "vi".into());
-    let status = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(format!("{editor} \"$1\""))
-        .arg("bk-edit")
-        .arg(path)
-        .status()
-        .with_context(|| format!("starting editor `{editor}`"))?;
+        .unwrap_or_else(|| if cfg!(windows) { "notepad" } else { "vi" }.into());
+    // `$EDITOR` may carry arguments (`code -w`); on Unix the shell splits it like everyone else does.
+    #[cfg(unix)]
+    let mut cmd = {
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(format!("{editor} \"$1\"")).arg("bk-edit").arg(path);
+        c
+    };
+    #[cfg(not(unix))]
+    let mut cmd = {
+        let words = split_words(&editor);
+        let mut c = Command::new(&words[0]);
+        c.args(&words[1..]).arg(path);
+        c
+    };
+    let status = cmd.status().with_context(|| format!("starting editor `{editor}`"))?;
     if !status.success() {
         bail!("editor `{editor}` exited with {status}");
     }
     Ok(())
+}
+
+/// Split a command line into words, honoring double quotes (`"C:\Program Files\x.exe" -w`).
+#[cfg_attr(unix, allow(dead_code))]
+fn split_words(s: &str) -> Vec<String> {
+    if Path::new(s).is_file() {
+        return vec![s.to_string()];
+    }
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in s.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    if words.is_empty() {
+        words.push(s.to_string());
+    }
+    words
+}
+
+/// Drop PowerShell session files left by sessions that ended without cleaning up (a week old).
+fn prune_sessions(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    for e in rd.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > week);
+        if old {
+            let _ = fs::remove_file(e.path());
+        }
+    }
 }
 
 pub fn edit(ctx: &Ctx, name: Option<String>, project: bool) -> Result<i32> {
@@ -149,9 +198,12 @@ pub fn doctor(ctx: &Ctx) -> Result<i32> {
 
     eprintln!("{}", style("setup").bold());
     ok(&format!("bookmarks file {}", paths::contract_tilde(&ctx.paths.config_file)));
-    match std::env::var("BK_SHELL_INTEGRATION") {
-        Ok(_) => ok("zsh hook loaded (bk save / bk go work)"),
-        Err(_) => warn("zsh hook not loaded: add `eval \"$(bk init zsh)\"` to ~/.zshrc for bk save / bk go"),
+    match crate::shellcmds::hook_shell(&ctx.env) {
+        Some(shell) => ok(&format!("{shell} hook loaded (bk save / bk go work)")),
+        None => {
+            let (file, line) = crate::shellcmds::hook_line(&ctx.env);
+            warn(&format!("shell hook not loaded: add `{line}` to {file} for bk save / bk go"))
+        }
     }
     let inv = discover::inventory(&ctx.env);
     match conda::find_base(&ctx.env) {
@@ -189,6 +241,7 @@ pub fn doctor(ctx: &Ctx) -> Result<i32> {
         }
     }
     let _ = recent::trim(&ctx.paths.recent_file());
+    prune_sessions(&ctx.paths.data_dir.join("sessions"));
 
     eprintln!("\n{}", style(format!("bookmarks ({})", report.checks.len())).bold());
     for e in &report.file_errors {
@@ -227,7 +280,7 @@ pub fn trust_cmd(ctx: &Ctx, path: Option<PathBuf>, revoke: bool) -> Result<i32> 
         Some(p) => p,
         None => ctx.project_file.clone().context("no .bk.toml in this folder or its parents")?,
     };
-    let file = fs::canonicalize(&file).with_context(|| format!("{} not found", file.display()))?;
+    let file = bk_core::paths::canonical(&file).with_context(|| format!("{} not found", file.display()))?;
     let shown = paths::contract_tilde(&file);
     if revoke {
         trust::untrust(&ctx.paths, &file)?;
@@ -324,11 +377,46 @@ pub fn import(ctx: &Ctx, file: &Path, project: bool, on_conflict: OnConflict) ->
 }
 
 pub fn app() -> Result<i32> {
-    let status = Command::new("/usr/bin/open").args(["-b", "com.clibooker.app"]).status()?;
-    if !status.success() {
-        bail!("Clibooker.app is not installed (build it with `pnpm -C app tauri build`)");
+    if cfg!(target_os = "macos") {
+        let status = Command::new("/usr/bin/open").args(["-b", "com.clibooker.app"]).status()?;
+        if !status.success() {
+            bail!("Clibooker.app is not installed (build it with `pnpm -C app tauri build`)");
+        }
+        return Ok(0);
     }
+    let exe = find_app().context("the Clibooker app is not installed (build it with `pnpm -C app tauri build`)")?;
+    Command::new(&exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting {}", exe.display()))?;
     Ok(0)
+}
+
+/// The desktop app's executable: next to `bk` (it ships inside the app), on PATH, or in the
+/// usual install folders.
+fn find_app() -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) { &["Clibooker.exe"] } else { &["Clibooker", "clibooker", "clibooker-app"] };
+    let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
+    let env = bk_core::env::current();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for n in names {
+        if let Some(d) = &beside {
+            candidates.push(d.join(n));
+        }
+        if let Some(p) = bk_core::env::which_in(&env, n) {
+            candidates.push(p);
+        }
+    }
+    if cfg!(windows) {
+        for var in ["LOCALAPPDATA", "ProgramFiles"] {
+            if let Some(d) = std::env::var_os(var) {
+                candidates.push(Path::new(&d).join("Clibooker").join("Clibooker.exe"));
+            }
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 pub fn scan(ctx: &Ctx, a: crate::cli::ScanArgs) -> Result<i32> {
@@ -341,7 +429,7 @@ pub fn scan(ctx: &Ctx, a: crate::cli::ScanArgs) -> Result<i32> {
         }
     }
     let dir = match &a.dir {
-        Some(d) => fs::canonicalize(d).with_context(|| format!("{d} not found"))?,
+        Some(d) => bk_core::paths::canonical(d).with_context(|| format!("{d} not found"))?,
         None => ctx.cwd.clone(),
     };
     let found = scripts::discover(&dir);

@@ -50,7 +50,7 @@ if [[ -z ${__BK_ZSH_LOADED-} ]]; then
   }
 
   if (( __BK_RECORD )); then
-    typeset -g __BK_RECENT_FILE=${BK_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bk}/recent.log
+    typeset -g __BK_RECENT_FILE=__BK_RECENT_FILE__
     [[ -e $__BK_RECENT_FILE ]] || ( umask 077; mkdir -p ${__BK_RECENT_FILE:h} && : >> $__BK_RECENT_FILE )
   fi
 
@@ -85,6 +85,7 @@ if [[ -z ${__BK_ZSH_LOADED-} ]]; then
       'ls:list bookmarks' 'show:show details' 'edit:edit in $EDITOR' 'rm:delete' 'mv:rename'
       'go:enter its folder and env' 'history:past runs' 'doctor:check bookmarks' 'trust:approve a project .bk.toml'
       'export:export bookmarks' 'import:import bookmarks' 'init:print shell integration' 'app:open the desktop app'
+      'scan:bookmark a project'"'"'s scripts' 'server:manage SSH servers' 'servers:list SSH servers' 'ssh:connect to a server'
     )
     if (( CURRENT == 2 )); then
       names=(${(f)"$(command bk ls --names 2>/dev/null)"})

@@ -1,16 +1,37 @@
 import { Plus, Sparkles, X } from "lucide-react";
 import type { FolderScan, Inventory, RuntimeLang } from "../lib/types";
 import { RUNTIME_LANGS } from "../lib/types";
+import { isMac, isWindows } from "../lib/platform";
 import { cn } from "../lib/utils";
 import { Input } from "./ui";
 
 export const RUNTIME_INFO: Record<RuntimeLang, { label: string; color: string; hint: string }> = {
-  node: { label: "Node.js", color: "bg-[#3c873a]", hint: "nvm · fnm · volta · mise · Homebrew; adds node_modules/.bin" },
-  java: { label: "Java", color: "bg-[#e76f00]", hint: "JDKs in /Library/Java · SDKMAN · Homebrew; sets JAVA_HOME" },
-  ruby: { label: "Ruby", color: "bg-[#cc342d]", hint: "rbenv · chruby · rvm · mise · Homebrew" },
-  go: { label: "Go", color: "bg-[#00add8]", hint: "~/sdk · goenv · mise, or GOTOOLCHAIN for a full version" },
+  node: {
+    label: "Node.js",
+    color: "bg-[#3c873a]",
+    hint: isWindows ? "nvm-windows · fnm · Volta · scoop · mise; adds node_modules/.bin" : "nvm · fnm · volta · mise · Homebrew; adds node_modules/.bin",
+  },
+  java: {
+    label: "Java",
+    color: "bg-[#e76f00]",
+    hint: isMac
+      ? "JDKs in /Library/Java · SDKMAN · Homebrew; sets JAVA_HOME"
+      : isWindows
+        ? "JDKs in Program Files (Oracle, Temurin, Microsoft, Zulu, Corretto) · scoop; sets JAVA_HOME"
+        : "JDKs in /usr/lib/jvm · SDKMAN · mise; sets JAVA_HOME",
+  },
+  ruby: {
+    label: "Ruby",
+    color: "bg-[#cc342d]",
+    hint: isWindows ? "RubyInstaller (C:\\Ruby*) · scoop · mise" : "rbenv · chruby · rvm · mise · Homebrew",
+  },
+  go: { label: "Go", color: "bg-[#00add8]", hint: "System Go · ~/sdk · goenv · mise, or GOTOOLCHAIN for a full version" },
   rust: { label: "Rust", color: "bg-[#b7410e]", hint: "rustup toolchain (stable, nightly, 1.80…)" },
-  php: { label: "PHP", color: "bg-[#777bb4]", hint: "Homebrew php@X · mise; adds vendor/bin" },
+  php: {
+    label: "PHP",
+    color: "bg-[#777bb4]",
+    hint: isMac ? "Homebrew php@X · mise; adds vendor/bin" : isWindows ? "C:\\php* · scoop · mise; adds vendor/bin" : "mise · Linuxbrew; adds vendor/bin",
+  },
 };
 
 type Runtimes = Partial<Record<RuntimeLang, string>>;

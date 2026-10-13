@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { KeyValueEditor, newKey, TagInput, type VarDraft } from "../components/editors";
 import { Badge, Button, Dialog, Field, IconButton, Input, Select } from "../components/ui";
 import { api, inTauri } from "../lib/api";
+import { contractHome, joinPath } from "../lib/platform";
 import { keys, useLibrary, useServerInventory, useServers, useServerStatus } from "../lib/queries";
 import { ALLOWED_SSH_OPTIONS, type Reach, type Server } from "../lib/types";
 import { cn, nameError, relativeTime } from "../lib/utils";
@@ -331,8 +332,8 @@ export function ServerView() {
                     onClick={async () => {
                       if (!inTauri) return;
                       const { open } = await import("@tauri-apps/plugin-dialog");
-                      const f = await open({ multiple: false, defaultPath: `${lib?.home ?? "~"}/.ssh` });
-                      if (typeof f === "string") set("identity", f.startsWith(`${lib?.home}/`) ? `~${f.slice(lib!.home.length)}` : f);
+                      const f = await open({ multiple: false, defaultPath: lib?.home ? joinPath(lib.home, ".ssh") : undefined });
+                      if (typeof f === "string") set("identity", contractHome(f, lib?.home));
                     }}
                   >
                     <FolderOpen size={13} /> Choose…

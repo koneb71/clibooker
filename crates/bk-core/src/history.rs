@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -82,12 +81,14 @@ pub fn append(path: &Path, rec: &RunRecord) -> Result<()> {
     }
     let mut line = serde_json::to_string(rec)?;
     line.push('\n');
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path).with_context(|| format!("opening {}", path.display()))?;
     f.write_all(line.as_bytes())?;
     Ok(())
 }
@@ -116,7 +117,6 @@ pub fn last_for(path: &Path, entry_id: &str) -> Option<RunRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn rec(name: &str, t: i64) -> RunRecord {
         RunRecord {
@@ -147,6 +147,10 @@ mod tests {
         assert_eq!(all.iter().map(|r| r.started_ms).collect::<Vec<_>>(), vec![3, 2, 1]);
         assert_eq!(read(&p, 10, Some("a")).unwrap().len(), 2);
         assert_eq!(last_for(&p, "g#b").unwrap().started_ms, 2);
-        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 }

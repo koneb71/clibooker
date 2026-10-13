@@ -39,6 +39,9 @@ pub enum Cmd {
         /// Print the shell code instead (used by the hook)
         #[arg(long)]
         print: bool,
+        /// Shell language to print [default: the hook's shell, else this OS's]
+        #[arg(long, value_enum)]
+        shell: Option<GoShell>,
     },
     /// Edit a bookmark (or the whole file) in $EDITOR
     Edit {
@@ -113,6 +116,9 @@ pub enum Cmd {
     },
     /// Open the Clibooker desktop app
     App,
+    /// Run a steps file for the desktop app (internal)
+    #[command(name = "__run", hide = true)]
+    RunSteps { file: std::path::PathBuf },
     /// `bk <name> [key=value...]`
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -239,8 +245,19 @@ pub enum OnConflict {
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum GoShell {
+    /// sh, bash, zsh
+    Posix,
+    #[value(alias = "pwsh")]
+    Powershell,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum InitShell {
     Zsh,
+    Bash,
+    #[value(alias = "pwsh")]
+    Powershell,
 }
 
 #[derive(Debug, Args)]

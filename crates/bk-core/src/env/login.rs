@@ -5,25 +5,32 @@
 //! shell and uses that environment as its base.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use super::{EnvMap, parse_env0};
 
-/// The user's login shell: `$SHELL`, else `/bin/zsh`.
+/// The user's login shell: `$SHELL`, else bash, else sh.
 pub fn user_shell() -> PathBuf {
-    std::env::var_os("SHELL").filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| "/bin/zsh".into())
+    std::env::var_os("SHELL").filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| {
+        ["/bin/bash", "/usr/bin/bash", "/bin/zsh"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+            .unwrap_or_else(|| "/bin/sh".into())
+    })
 }
 
 /// Run `shell -l -i` and capture its environment. The env is written to a temp file
 /// rather than stdout so rc-file noise or background jobs holding the pipe can't interfere.
 pub fn login_env(shell: &Path, timeout: Duration) -> Result<EnvMap> {
     let out = tempfile::NamedTempFile::new()?;
-    let mut child = Command::new(shell)
-        .args(["-l", "-i", "-c", r#"/usr/bin/env -0 > "$1""#, "bk-login"])
-        .arg(out.path())
+    // The output path goes in a variable rather than `$1`, which fish doesn't have.
+    let mut child = crate::proc::background(shell)
+        .args(["-l", "-i", "-c", r#"/usr/bin/env -0 > "$BK_LOGIN_ENV_OUT""#])
+        .env("BK_LOGIN_ENV_OUT", out.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -46,8 +53,8 @@ pub fn login_env(shell: &Path, timeout: Duration) -> Result<EnvMap> {
         bail!("{} exited with {status} without printing its environment", shell.display());
     }
     let mut env = parse_env0(&bytes);
-    for k in ["_", "PWD", "OLDPWD", "SHLVL"] {
-        env.remove(std::ffi::OsStr::new(k));
+    for k in ["_", "PWD", "OLDPWD", "SHLVL", "BK_LOGIN_ENV_OUT"] {
+        crate::env::unset(&mut env, k);
     }
     Ok(env)
 }

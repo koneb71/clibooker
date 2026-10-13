@@ -5,6 +5,10 @@
 //! so steps can't be separate session leaders on a shared PTY. A remote run is `ssh -tt`
 //! running the same wrapper on the server. Either way the wrapper prints step headers and
 //! reports progress with in-band markers (see `markers.rs`) that the reader strips.
+//!
+//! Windows has no POSIX `sh`, and ConPTY drops unknown escape sequences, so there a local run
+//! is the bundled `bk.exe __run` (the CLI's own step runner), which writes its progress to a
+//! file we follow. Its process tree lives in a Job Object so Stop can end all of it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -134,6 +138,9 @@ pub struct Run {
     tunnels: Mutex<Tunnels>,
     /// Bookmark name of a tmux-backed (keep running) run.
     tmux_bookmark: Option<String>,
+    /// Windows: the job holding the run's whole process tree.
+    #[cfg(windows)]
+    job: Option<crate::job::Job>,
 }
 
 impl Run {
@@ -158,6 +165,7 @@ impl Run {
         let _ = app.emit("run-updated", info);
     }
 
+    #[cfg(unix)]
     fn signal_foreground(&self, sig: i32) {
         let pgid = self.master.lock().expect("master lock").as_ref().and_then(|m| m.process_group_leader());
         if let Some(pg) = pgid.filter(|p| *p > 0) {
@@ -167,7 +175,36 @@ impl Run {
         }
     }
 
+    /// Ctrl+C for whatever runs in the terminal.
+    fn interrupt(&self) {
+        #[cfg(unix)]
+        self.signal_foreground(libc::SIGINT);
+        // ConPTY turns ^C into a Ctrl+C event for every process on the console.
+        #[cfg(windows)]
+        self.write_input(b"\x03");
+    }
+
+    /// The firmer second step: SIGTERM, or on Windows ending the whole process tree.
+    fn terminate(&self) {
+        #[cfg(unix)]
+        self.signal_foreground(libc::SIGTERM);
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.terminate();
+        }
+    }
+
+    /// The app is quitting.
+    fn hang_up(&self) {
+        #[cfg(unix)]
+        self.signal_foreground(libc::SIGHUP);
+        #[cfg(windows)]
+        self.terminate();
+    }
+
     fn kill_local(&self) {
+        #[cfg(windows)]
+        self.terminate();
         if let Some(k) = self.killer.lock().expect("killer lock").as_mut() {
             let _ = k.kill();
         }
@@ -211,37 +248,45 @@ pub struct Spawn {
     pub record: Option<RunRecord>,
     /// Keep-running (tmux) run of this bookmark, and whether we reattached to it.
     pub tmux: Option<(String, bool)>,
+    /// Windows local runs: the steps file to write for `bk __run`, and its progress file.
+    pub local_steps: Option<LocalSteps>,
 }
 
+pub struct LocalSteps {
+    pub steps_file: PathBuf,
+    pub steps_json: String,
+    pub progress_file: PathBuf,
+}
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn term_env(env: &mut EnvMap) {
-    env.insert("TERM".into(), "xterm-256color".into());
-    env.insert("COLORTERM".into(), "truecolor".into());
-    env.insert("TERM_PROGRAM".into(), "Clibooker".into());
-    if !env.contains_key(std::ffi::OsStr::new("LANG")) {
-        env.insert("LANG".into(), "en_US.UTF-8".into());
+    bk_core::env::set(env, "TERM", "xterm-256color");
+    bk_core::env::set(env, "COLORTERM", "truecolor");
+    bk_core::env::set(env, "TERM_PROGRAM", "Clibooker");
+    if bk_core::env::get(env, "LANG").is_none() {
+        bk_core::env::set(env, "LANG", "en_US.UTF-8");
     }
 }
 
 impl Spawn {
-    /// A local bookmark run: the shared wrapper under `/bin/sh`.
+    /// A local bookmark run: the shared wrapper under `/bin/sh`, or `bk.exe __run` on Windows.
     pub fn local(plan: &RunPlan) -> Spawn {
-        let shell: Vec<String> = std::iter::once(plan.shell.display().to_string())
-            .chain(plan.shell_args.iter().cloned())
-            .map(|a| q(&a))
-            .collect();
-        let shell = shell.join(" ");
+        if cfg!(windows) {
+            return Spawn::local_runner(plan);
+        }
         let steps: Vec<WrapperStep> = plan
             .steps
             .iter()
             .map(|s| WrapperStep {
                 label: s.label.clone(),
-                run: format!("{shell} {}", q(&s.command)),
+                run: plan.argv(s).iter().map(|a| q(&a.to_string_lossy())).collect::<Vec<_>>().join(" "),
                 cd: Some(q(&s.cwd.display().to_string())),
                 display: s.command.clone(),
                 continue_on_error: s.continue_on_error,
             })
             .collect();
-        let title = format!("{} · {} · {}", plan.name, paths::contract_tilde(&plan.cwd), plan.env_description);
+        let title = plan.title();
         let script = wrapper(&steps, &WrapperOptions { markers: true, title, ..Default::default() });
         let mut env = plan.env.clone();
         term_env(&mut env);
@@ -262,6 +307,52 @@ impl Spawn {
             forwards: Vec::new(),
             record: Some(RunRecord::from_plan(plan, "app", 0)),
             tmux: None,
+            local_steps: None,
+        }
+    }
+
+    /// A local run through the bundled CLI's step runner (Windows). The plan's env becomes the
+    /// runner's own environment, so `.env` values never touch disk; the steps file holds only
+    /// the shell, the steps and the title.
+    fn local_runner(plan: &RunPlan) -> Spawn {
+        let base = std::env::temp_dir().join(format!(
+            "clibooker-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let steps_file = base.with_extension("json");
+        let progress_file = base.with_extension("progress");
+        let steps = plan.steps_file(Some(progress_file.clone()));
+        // The bundled CLI sits next to the app; CLIBOOKER_BK points elsewhere (tests, dev).
+        let runner = std::env::var_os("CLIBOOKER_BK").map(PathBuf::from).unwrap_or_else(|| {
+            std::env::current_exe()
+                .map(|e| e.with_file_name(if cfg!(windows) { "bk.exe" } else { "bk" }))
+                .unwrap_or_else(|_| PathBuf::from("bk"))
+        });
+        let mut env = plan.env.clone();
+        term_env(&mut env);
+        Spawn {
+            kind: Kind::Bookmark,
+            name: plan.name.clone(),
+            entry_id: plan.entry_id.clone(),
+            program: runner.display().to_string(),
+            args: vec!["__run".into(), steps_file.display().to_string()],
+            cwd: plan.cwd.clone(),
+            env,
+            step_labels: plan.steps.iter().map(|s| s.label.clone()).collect(),
+            cwd_label: paths::contract_tilde(&plan.cwd),
+            env_label: plan.env_label.clone(),
+            params: plan.params.clone(),
+            server: None,
+            remote: None,
+            forwards: Vec::new(),
+            record: Some(RunRecord::from_plan(plan, "app", 0)),
+            tmux: None,
+            local_steps: Some(LocalSteps {
+                steps_file,
+                steps_json: serde_json::to_string(&steps).unwrap_or_default(),
+                progress_file,
+            }),
         }
     }
 
@@ -291,6 +382,7 @@ impl Spawn {
             forwards: plan.forwards.clone(),
             record: Some(RunRecord::from_remote(plan, "app", 0)),
             tmux: None,
+            local_steps: None,
         }
     }
 
@@ -322,6 +414,7 @@ impl Spawn {
             forwards,
             record: None,
             tmux: None,
+            local_steps: None,
         }
     }
 }
@@ -362,6 +455,10 @@ impl RunManager {
             _ => Tunnels::none(),
         };
 
+        if let Some(ls) = &spawn.local_steps {
+            std::fs::write(&ls.steps_file, &ls.steps_json).context("writing the steps file")?;
+            let _ = std::fs::remove_file(&ls.progress_file);
+        }
         let pair = native_pty_system()
             .openpty(PtySize { rows: opts.rows.max(5), cols: opts.cols.max(20), pixel_width: 0, pixel_height: 0 })
             .context("opening a pseudo-terminal")?;
@@ -375,6 +472,14 @@ impl RunManager {
         let mut child = pair.slave.spawn_command(cmd).with_context(|| format!("starting {}", spawn.program))?;
         // Only the child should hold the slave side, so we see EOF when it's done.
         drop(pair.slave);
+        #[cfg(windows)]
+        let job = child.process_id().and_then(|pid| match crate::job::Job::for_process(pid) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                eprintln!("run won't be able to stop child processes: {e:#}");
+                None
+            }
+        });
         let killer = child.clone_killer();
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
@@ -414,6 +519,8 @@ impl RunManager {
             done_code: Mutex::new(None),
             tunnels: Mutex::new(tunnels),
             tmux_bookmark: spawn.tmux.as_ref().map(|(b, _)| b.clone()),
+            #[cfg(windows)]
+            job,
         });
         if let Some((_, true)) = &spawn.tmux {
             let line = "\x1b[2m↺ reattached to the run still going on the server (tmux)\x1b[0m\r\n";
@@ -454,11 +561,13 @@ impl RunManager {
             let _ = eof_tx.send(());
         })?;
 
-        // tmux swallows the markers: follow the run's state file instead.
+        // tmux swallows the markers: follow the run's state file instead. Without ssh's
+        // connection sharing (Windows) each poll is a full login, so poll less often there.
         if let (Some(bookmark), Some(ctl)) = (run.tmux_bookmark.clone(), run.remote.clone()) {
             let poll_run = run.clone();
             let poll_app = app.clone();
             let labels = spawn.step_labels.clone();
+            let every = Duration::from_secs(if bk_core::servers::MULTIPLEX { 2 } else { 5 });
             std::thread::Builder::new().name(format!("{id}-progress")).spawn(move || {
                 std::thread::sleep(Duration::from_millis(800));
                 while poll_run.is_running() {
@@ -467,7 +576,37 @@ impl RunManager {
                             handle_marker(&poll_run, &poll_app, &labels, &m);
                         }
                     }
-                    std::thread::sleep(Duration::from_secs(2));
+                    std::thread::sleep(every);
+                }
+            })?;
+        }
+
+        // `bk __run` (Windows) writes progress lines to a file: follow its new lines.
+        let mut temp_files = Vec::new();
+        if let Some(ls) = &spawn.local_steps {
+            temp_files.extend([ls.steps_file.clone(), ls.progress_file.clone()]);
+            let poll_run = run.clone();
+            let poll_app = app.clone();
+            let labels = spawn.step_labels.clone();
+            let file = ls.progress_file.clone();
+            std::thread::Builder::new().name(format!("{id}-progress")).spawn(move || {
+                let mut seen = 0usize;
+                loop {
+                    let running = poll_run.is_running();
+                    if let Ok(text) = std::fs::read_to_string(&file)
+                        && text.len() > seen
+                    {
+                        // Only whole lines; a partial last line is read next time.
+                        let upto = text[seen..].rfind('\n').map(|i| seen + i + 1).unwrap_or(seen);
+                        for line in text[seen..upto].lines() {
+                            handle_marker(&poll_run, &poll_app, &labels, line.trim());
+                        }
+                        seen = upto;
+                    }
+                    if !running {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
                 }
             })?;
         }
@@ -475,12 +614,32 @@ impl RunManager {
         let waiter_app = app.clone();
         let waiter_run = run.clone();
         let record = spawn.record;
+        let final_progress = spawn.local_steps.as_ref().map(|ls| (ls.progress_file.clone(), spawn.step_labels.clone()));
         std::thread::Builder::new().name(format!("{id}-waiter")).spawn(move || {
             let started = Instant::now();
             let status = child.wait();
+            // ConPTY keeps its output open until the pseudo console is closed, even after the
+            // process exits; closing it can block while output drains, so do it on the side.
+            #[cfg(windows)]
+            {
+                let master = waiter_run.master.lock().expect("master lock").take();
+                let writer = waiter_run.writer.lock().expect("writer lock").take();
+                std::thread::spawn(move || drop((writer, master)));
+            }
             // Let the reader drain; don't wait forever if a background job keeps the tty open.
             let _ = eof_rx.recv_timeout(Duration::from_millis(1500));
+            // A quick run can end between two polls of its progress file: read it once more.
+            if let Some((file, labels)) = &final_progress
+                && let Ok(text) = std::fs::read_to_string(file)
+            {
+                for line in text.lines() {
+                    handle_marker(&waiter_run, &waiter_app, labels, line.trim());
+                }
+            }
             finish(waiter_app, waiter_run, record, status, started.elapsed(), opts);
+            for f in temp_files {
+                let _ = std::fs::remove_file(f);
+            }
         })?;
 
         let _ = app.emit("run-updated", info.clone());
@@ -571,11 +730,11 @@ impl RunManager {
             });
             return Ok(());
         }
-        run.signal_foreground(libc::SIGINT);
+        run.interrupt();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(3));
             if run.is_running() {
-                run.signal_foreground(libc::SIGTERM);
+                run.terminate();
                 std::thread::sleep(Duration::from_secs(2));
                 if run.is_running() {
                     run.kill_local();
@@ -614,7 +773,7 @@ impl RunManager {
         for run in runs.into_iter().filter(|r| r.is_running()) {
             run.stop_requested.store(true, Ordering::SeqCst);
             if run.remote.is_none() {
-                run.signal_foreground(libc::SIGHUP);
+                run.hang_up();
             }
             run.kill_local();
             run.tunnels.lock().expect("tunnels lock").close();
@@ -649,13 +808,16 @@ fn handle_marker<R: Runtime>(run: &Run, app: &AppHandle<R>, labels: &[String], m
 }
 
 fn exit_code(st: &portable_pty::ExitStatus) -> i32 {
-    match st.signal() {
-        Some(name) => 128 + signal_number(name),
-        None => st.exit_code() as i32,
+    #[cfg(unix)]
+    if let Some(name) = st.signal() {
+        return 128 + signal_number(name);
     }
+    // Windows crash codes (0xC0000005, ...) would otherwise read as negative or huge.
+    bk_core::proc::normalize_code(st.exit_code() as i32)
 }
 
 /// portable-pty reports signals by name (`strsignal`), e.g. "Interrupt: 2" on macOS.
+#[cfg(unix)]
 fn signal_number(name: &str) -> i32 {
     if let Some((_, n)) = name.rsplit_once(':')
         && let Ok(n) = n.trim().parse()
@@ -790,6 +952,7 @@ fn notify_finished<R: Runtime>(app: &AppHandle<R>, info: &RunInfo, took: &str) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn signal_names() {
         assert_eq!(signal_number("Interrupt: 2"), 2);
@@ -826,9 +989,100 @@ mod tests {
     }
 }
 
+/// The Windows run path (`bk __run` + progress file) works on every OS, so it's tested
+/// everywhere, against the sidecar build of `bk` (skipped when it hasn't been built).
+#[cfg(test)]
+mod runner_e2e {
+    use super::*;
+    use bk_core::model::{Bookmark, Settings, Step};
+    use bk_core::plan::RunRequest;
+    use bk_core::store::{Entry, Scope};
+
+    fn sidecar() -> Option<PathBuf> {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+        std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("bk-")))
+    }
+
+    fn wait_done(mgr: &RunManager, id: &str, secs: u64) -> RunInfo {
+        let start = Instant::now();
+        loop {
+            let info = mgr.list().into_iter().find(|r| r.id == id).unwrap();
+            if info.status != Status::Running {
+                return info;
+            }
+            assert!(start.elapsed() < Duration::from_secs(secs), "run still going after {secs}s");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn start(mgr: &RunManager, steps: Vec<Step>) -> (RunInfo, PathBuf) {
+        let d = tempfile::tempdir().unwrap().keep();
+        let b = Bookmark {
+            cwd: Some(".".into()),
+            shell: Some(if cfg!(windows) { "powershell" } else { "sh" }.into()),
+            steps,
+            ..Default::default()
+        };
+        let mut e = Entry::new("runner", Scope::Global, &d.join("b.toml"), b);
+        e.base_dir = d.clone();
+        let req = RunRequest { default_cwd: d.clone(), ..Default::default() };
+        let plan =
+            bk_core::plan::build(&e, &req, &bk_core::env::current(), &Settings::default(), bk_core::env::Mode::Run)
+                .unwrap();
+        let spawn = Spawn::local_runner(&plan);
+        let progress = spawn.local_steps.as_ref().unwrap().progress_file.clone();
+        let opts = StartOptions {
+            cols: 100,
+            rows: 30,
+            background: false,
+            notify: false,
+            record_history: false,
+            history_file: d.join("history.jsonl"),
+        };
+        let app = tauri::test::mock_app();
+        (mgr.start(app.handle().clone(), spawn, opts, None).unwrap(), progress)
+    }
+
+    #[test]
+    fn steps_progress_exit_codes_and_stop() {
+        let Some(bk) = sidecar() else {
+            eprintln!("skipping: no sidecar bk (node app/scripts/prepare-sidecar.mjs debug)");
+            return;
+        };
+        // SAFETY: set before any run starts; the tests here read it only in `local_runner`.
+        unsafe { std::env::set_var("CLIBOOKER_BK", &bk) };
+        let mgr = RunManager::default();
+
+        let echo = if cfg!(windows) { "Write-Output one-$((1+1))" } else { "echo one-$((1+1))" };
+        let (info, progress) = start(&mgr, vec![Step::new(echo), Step::new("exit 3")]);
+        let done = wait_done(&mgr, &info.id, 30);
+        let out = String::from_utf8_lossy(&mgr.get(&info.id).unwrap().output.lock().unwrap().buf).into_owned();
+        assert_eq!((done.status, done.exit_code), (Status::Failed, Some(3)), "{out}");
+        assert_eq!(done.step, 2, "{out}");
+        assert!(out.contains("one-2") && out.contains("[2/2]"), "{out}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!progress.exists(), "progress file left behind");
+
+        let sleep = if cfg!(windows) { "Start-Sleep -Seconds 30" } else { "sleep 30" };
+        let (info, _) = start(&mgr, vec![Step::new(sleep), Step::new("echo never")]);
+        std::thread::sleep(Duration::from_millis(1500));
+        let t = Instant::now();
+        mgr.stop(&info.id).unwrap();
+        let done = wait_done(&mgr, &info.id, 15);
+        let out = String::from_utf8_lossy(&mgr.get(&info.id).unwrap().output.lock().unwrap().buf).into_owned();
+        assert_eq!(done.status, Status::Stopped, "{out}");
+        assert!(t.elapsed() < Duration::from_secs(10));
+        assert!(!out.contains("never"), "{out}");
+    }
+}
+
 /// Headless end-to-end tests of remote runs against a real, unprivileged sshd on 127.0.0.1,
 /// driven through Tauri's mock runtime (skipped when sshd is missing).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod ssh_e2e {
     use super::*;
     use bk_core::model::Bookmark;

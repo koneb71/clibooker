@@ -11,12 +11,12 @@ bk train               # later, from anywhere: cd + activate + run
 
 It comes in two parts that share the same bookmarks file:
 
-- **Clibooker.app**, a macOS desktop app:
+- **Clibooker**, a desktop app for macOS, Linux and Windows:
   - a bookmark library and editor;
   - an embedded terminal for runs;
-  - a menu-bar icon;
-  - a global quick-run palette (⌥Space).
-- **`bk`**, a CLI with zsh integration: save the command you just ran, run bookmarks, enter a bookmark's environment.
+  - a menu-bar / system-tray icon;
+  - a global quick-run palette (⌥Space on macOS, Ctrl+Alt+Space elsewhere).
+- **`bk`**, a CLI with zsh, bash and PowerShell integration: save the command you just ran, run bookmarks, enter a bookmark's environment.
 
 ## Features
 
@@ -46,31 +46,56 @@ It comes in two parts that share the same bookmarks file:
 - **Pop-out:** open a bookmark in Terminal, iTerm, Ghostty or Warp, or copy it as a one-liner.
 - **SSH servers:** connect to your servers, run bookmarks on them, forward ports, and keep long jobs running after you disconnect (see below).
 
-## Build & install
+## Install
 
-You need Rust (stable), Node and pnpm, and Xcode command-line tools.
+Download the app for your platform from [Releases](https://github.com/koneb71/clibooker/releases):
+
+| Platform | App | CLI only |
+| --- | --- | --- |
+| macOS | `.dmg` (Apple Silicon or Intel) | `bk-…-apple-darwin.tar.gz` |
+| Linux | `.deb`, `.rpm` or `.AppImage` | `bk-…-linux-gnu.tar.gz` |
+| Windows | `…-setup.exe` (per user) or `.msi` | `bk-…-windows-msvc.zip` |
+
+The builds aren't signed yet:
+- **macOS:** right-click the app and choose **Open** the first time.
+- **Windows:** SmartScreen asks once; choose **More info → Run anyway**.
+
+The app bundles `bk`:
+- **macOS and Linux:** **Settings → Command line → Install bk command** links it into `~/.local/bin`. The `.deb`/`.rpm` packages already install it as `/usr/bin/bk`.
+- **Windows:** **Add bk to PATH** adds the app's folder to your user PATH.
+
+### Build from source
+
+You need Rust (stable), Node 20+ and pnpm, plus each platform's prerequisites:
+- **macOS:** Xcode command-line tools.
+- **Linux:** `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev`.
+- **Windows:** the MSVC build tools; WebView2 already ships with Windows 10 and 11.
 
 ```sh
 # CLI only
 cargo install --path crates/bk-cli          # installs ~/.cargo/bin/bk
 
-# Desktop app (.app + .dmg in target/release/bundle/)
+# Desktop app (installers in target/release/bundle/)
 cd app && pnpm install && pnpm tauri build
 ```
 
-The app bundles `bk`. **Settings → Command line → Install bk command** links it into `~/.local/bin`.
+### Shell integration
 
-### Shell integration (zsh)
+Add the line for your shell and open a new terminal:
 
-Add this to `~/.zshrc`, after `conda init` and `compinit`:
+| Shell | File | Line |
+| --- | --- | --- |
+| zsh | `~/.zshrc` (after `conda init` and `compinit`) | `eval "$(bk init zsh)"` |
+| bash | `~/.bashrc` (after `conda init`) | `eval "$(bk init bash)"` |
+| PowerShell | `$PROFILE` | `bk init powershell \| Out-String \| Invoke-Expression` |
 
-```sh
-eval "$(bk init zsh)"            # bk save, bk go, completion
-# or
-eval "$(bk init zsh --record)"   # also feed the app's Inbox with your recent commands
-```
+This gives you `bk save`, `bk go` and tab completion:
+- **The bash hook** has no DEBUG trap, so it coexists with starship, atuin and bash-preexec.
+- **The PowerShell hook** wraps your existing prompt.
 
-`--record` skips any command that starts with a space or looks like it contains a secret (`token`, `password`, `api_key`, …). The log file is mode 0600 and keeps only the last 500 commands.
+Add `--record` (e.g. `eval "$(bk init zsh --record)"`) to also feed the app's Inbox with your recent commands:
+- Commands that start with a space, or that look like they contain a secret (`token`, `password`, `api_key`, …), are skipped.
+- The log file is private to you and keeps only the last 500 commands.
 
 ## CLI
 
@@ -212,6 +237,31 @@ Safety:
 - Hosts and users are validated.
 - Project `.bk.toml` files can reference servers but not define them, and they still need `bk trust`.
 
+## Platforms
+
+Bookmarks files are plain TOML and work on every OS. Paths under your home folder are stored as `~/…`. Each platform behaves a little differently:
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Bookmarks file | `~/.config/bk/bookmarks.toml` | `~/.config/bk/bookmarks.toml` (`$XDG_CONFIG_HOME`) | `%APPDATA%\bk\bookmarks.toml` |
+| History, trust, Inbox | `~/.local/share/bk` | `~/.local/share/bk` (`$XDG_DATA_HOME`) | `%LOCALAPPDATA%\bk` |
+| Steps run in | `$SHELL` if zsh/bash, else `sh` | same | PowerShell (`pwsh` if installed) |
+| Other step shells | any (`shell = "fish"`) | any | `cmd`, Git Bash (`shell = "bash"`), `powershell` |
+| `bk go`, Open in terminal | POSIX shell | POSIX shell | PowerShell |
+| Open in terminal | Terminal, iTerm, Ghostty, Warp | `$TERMINAL`, GNOME Terminal, Konsole, kitty, … | Windows Terminal or a PowerShell window |
+
+Envs and runtimes behave the same everywhere:
+- Conda envs, venvs (`bin/` or `Scripts\`), uv and poetry all work.
+- Runtimes are found where each OS keeps them:
+  - Windows: nvm-windows, Volta, fnm, scoop, JDKs in Program Files, RubyInstaller.
+  - Linux: `/usr/lib/jvm`, `/usr/local/go`, Linuxbrew, mise.
+
+Known limits:
+- **Linux, Wayland:** global shortcuts don't work. Bind a system shortcut to `Clibooker --palette` instead (the Settings page shows how).
+- **Linux, GNOME:** the tray icon needs the AppIndicator extension. Without it, closing the window hides the app; open Clibooker again to bring it back, or turn off **Keep running when the window is closed**.
+- **Windows, PowerShell 5.1:** it has no `&&`/`||`. Install PowerShell 7 (`winget install Microsoft.PowerShell`) for steps written that way.
+- **Windows, SSH:** Windows' OpenSSH can't share connections, so server checks and keep-running progress are slower. Step progress for remote runs isn't shown; their exit status is.
+
 ## Development
 
 ```sh
@@ -224,8 +274,9 @@ cd app && pnpm dev            # UI only, in a browser, against an in-memory mock
 ```
 crates/bk-core     shared logic: model, store (toml_edit), env activation, plan, render, history, trust, doctor,
                    servers (ssh config, argv, status, discovery), remote (remote runs, tmux), script (run wrapper)
-crates/bk-cli      the `bk` binary + zsh integration (src/shell/init.zsh)
-app/src-tauri      Tauri backend: PTY runs, palette, tray, file watcher, commands
+crates/bk-cli      the `bk` binary, its step runner (also the app's on Windows), and the zsh/bash/PowerShell
+                   integrations (src/shell/)
+app/src-tauri      Tauri backend: PTY runs (ConPTY + Job Objects on Windows), palette, tray, file watcher, commands
 app/src            React UI (library, editor, terminal tabs, palette, history, inbox, doctor, settings)
 ```
 

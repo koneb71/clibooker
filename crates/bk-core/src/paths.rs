@@ -14,21 +14,18 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Resolve from `BK_CONFIG`, `BK_DATA_DIR`, XDG variables, then `~/.config` / `~/.local/share`.
+    /// Resolve from `BK_CONFIG`, `BK_DATA_DIR`, XDG variables, then the platform default:
+    /// `~/.config/bk` + `~/.local/share/bk` on macOS/Linux, `%APPDATA%\bk` + `%LOCALAPPDATA%\bk` on Windows.
     pub fn from_env() -> Self {
-        let home = home();
         let config_file = non_empty_var("BK_CONFIG").map(PathBuf::from).unwrap_or_else(|| {
             non_empty_var("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".config"))
+                .unwrap_or_else(default_config_dir)
                 .join("bk")
                 .join("bookmarks.toml")
         });
         let data_dir = non_empty_var("BK_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-            non_empty_var("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".local").join("share"))
-                .join("bk")
+            non_empty_var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(default_data_dir).join("bk")
         });
         Paths { config_file, data_dir }
     }
@@ -51,28 +48,71 @@ fn non_empty_var(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-pub fn home() -> PathBuf {
-    env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
-}
-
-/// Expand a leading `~` / `~/`.
-pub fn expand_tilde(s: &str) -> PathBuf {
-    if s == "~" {
-        home()
-    } else if let Some(rest) = s.strip_prefix("~/") {
-        home().join(rest)
+fn default_config_dir() -> PathBuf {
+    if cfg!(windows) {
+        non_empty_var("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData").join("Roaming"))
     } else {
-        PathBuf::from(s)
+        home().join(".config")
     }
 }
 
-/// Replace the home prefix with `~` for storage/display.
+fn default_data_dir() -> PathBuf {
+    if cfg!(windows) {
+        non_empty_var("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData").join("Local"))
+    } else {
+        home().join(".local").join("share")
+    }
+}
+
+pub fn home() -> PathBuf {
+    env::home_dir().unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
+}
+
+/// Expand a leading `~` / `~/` (and `~\` on Windows).
+pub fn expand_tilde(s: &str) -> PathBuf {
+    if s == "~" {
+        return home();
+    }
+    let rest = s.strip_prefix("~/").or_else(|| if cfg!(windows) { s.strip_prefix("~\\") } else { None });
+    match rest {
+        Some(rest) => normalize(&home().join(rest)),
+        None => PathBuf::from(s),
+    }
+}
+
+/// Replace the home prefix with `~` for storage/display. Always uses `/` after `~`, so stored
+/// paths read the same on every OS.
 pub fn contract_tilde(p: &Path) -> String {
     let home = home();
-    match p.strip_prefix(&home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => p.display().to_string(),
+    let mut rest = p.components();
+    let mut home_parts = home.components();
+    loop {
+        match (home_parts.next(), rest.clone().next()) {
+            (None, _) => break,
+            (Some(h), Some(c)) if same_component(h.as_os_str(), c.as_os_str()) => {
+                rest.next();
+            }
+            _ => return p.display().to_string(),
+        }
+    }
+    let parts: Vec<String> = rest.map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    if parts.is_empty() { "~".into() } else { format!("~/{}", parts.join("/")) }
+}
+
+fn same_component(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    if cfg!(windows) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
+}
+
+/// Whether two paths name the same location, lexically: ignores trailing separators, and on
+/// Windows also case and `/` vs `\`.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let (mut x, mut y) = (a.components(), b.components());
+    loop {
+        match (x.next(), y.next()) {
+            (None, None) => return true,
+            (Some(p), Some(q)) if same_component(p.as_os_str(), q.as_os_str()) => {}
+            _ => return false,
+        }
     }
 }
 
@@ -100,6 +140,11 @@ pub fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// `fs::canonicalize` without Windows' `\\?\` prefix where a plain path works.
+pub fn canonical(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(p)
+}
+
 /// Walk up from `start` looking for a `.bk.toml`.
 pub fn find_project_file(start: &Path) -> Option<PathBuf> {
     start.ancestors().map(|d| d.join(PROJECT_FILE)).find(|f| f.is_file())
@@ -113,13 +158,32 @@ mod tests {
     fn tilde_round_trip() {
         let p = expand_tilde("~/work/x");
         assert!(p.is_absolute());
+        assert_eq!(p, home().join("work").join("x"));
         assert_eq!(contract_tilde(&p), "~/work/x");
-        assert_eq!(contract_tilde(Path::new("/etc")), "/etc");
+        assert_eq!(contract_tilde(&home()), "~");
+        // A sibling of home that shares its prefix text is not under home.
+        let sibling = PathBuf::from(format!("{}x", home().display()));
+        assert_eq!(contract_tilde(&sibling), sibling.display().to_string());
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_relative() {
+        assert_eq!(contract_tilde(Path::new("/etc")), "/etc");
         assert_eq!(resolve("frontend/../api", Path::new("/r/p")), PathBuf::from("/r/p/api"));
         assert_eq!(resolve("/abs", Path::new("/r")), PathBuf::from("/abs"));
+        assert!(same_path(Path::new("/a/b/"), Path::new("/a/b")));
+        assert!(!same_path(Path::new("/a/B"), Path::new("/a/b")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths() {
+        assert_eq!(resolve("frontend/../api", Path::new(r"C:\r\p")), PathBuf::from(r"C:\r\p\api"));
+        assert_eq!(resolve(r"D:\abs", Path::new(r"C:\r")), PathBuf::from(r"D:\abs"));
+        assert_eq!(expand_tilde(r"~\a\b"), home().join("a").join("b"));
+        assert!(same_path(Path::new(r"c:\Users\X\"), Path::new("C:/users/x")));
+        let upper = PathBuf::from(home().display().to_string().to_uppercase()).join("w");
+        assert_eq!(contract_tilde(&upper), "~/w");
     }
 }

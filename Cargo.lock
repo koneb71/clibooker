@@ -385,6 +385,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "dotenvy",
+ "dunce",
  "jiff",
  "regex",
  "serde",
@@ -709,6 +710,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
  "tempfile",
+ "windows-sys 0.61.2",
+ "winreg 0.56.0",
 ]
 
 [[package]]

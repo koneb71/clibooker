@@ -11,6 +11,7 @@ authors.workspace = true
 anyhow = "1.0.104"
 base64 = "0.23.1"
 dotenvy = "0.15.7"
+dunce = "1"
 jiff = "0.2.38"
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }

@@ -25,7 +25,7 @@ fn read(paths: &Paths) -> BTreeMap<String, String> {
 }
 
 fn key(file: &Path) -> String {
-    let canon = fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let canon = dunce::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     paths::contract_tilde(&canon)
 }
 

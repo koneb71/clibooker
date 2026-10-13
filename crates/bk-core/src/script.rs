@@ -89,7 +89,7 @@ pub fn wrapper(steps: &[WrapperStep], o: &WrapperOptions) -> String {
     s
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::process::Command;

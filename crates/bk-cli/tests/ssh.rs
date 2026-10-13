@@ -1,5 +1,6 @@
 //! End-to-end tests against a real, unprivileged `sshd` on 127.0.0.1 (skipped if missing).
 //! The "server" is this machine, logged into as the current user.
+#![cfg(unix)]
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -212,7 +213,6 @@ fn remote_node_runtime_and_scan() {
     let work = e.work();
     std::fs::write(work.join("package.json"), r#"{"scripts":{"hello":"echo hello from npm"}}"#).unwrap();
     std::fs::write(work.join("Makefile"), "greet:\n\techo hi from make\n").unwrap();
-    std::fs::write(work.join(".nvmrc"), "22\n").unwrap();
     let dir = work.display().to_string();
     e.bk()
         .args(["scan", "--list", &format!("t:{dir}")])
@@ -226,12 +226,14 @@ fn remote_node_runtime_and_scan() {
         .stderr(contains("bookmarked 2 scripts"));
     e.bk().arg("w-greet").assert().success().stdout(contains("hi from make"));
     let cfg = std::fs::read_to_string(e.home.path().join("bookmarks.toml")).unwrap();
-    assert!(cfg.contains("server = \"t\"") && cfg.contains("runtimes = { node = \"auto\" }"), "{cfg}");
-    // Node from the server's nvm, picked by .nvmrc (needs nvm's 22.x on this machine).
+    assert!(cfg.contains("server = \"t\""), "{cfg}");
+    // Node from the server's nvm, picked by .nvmrc (needs nvm's 22.x on this machine; without
+    // it the pin can't be met and runs fail, as they should).
     if std::fs::read_dir(bk_core::paths::home().join(".nvm/versions/node"))
         .map(|rd| rd.flatten().any(|d| d.file_name().to_string_lossy().starts_with("v22")))
         .unwrap_or(false)
     {
+        std::fs::write(work.join(".nvmrc"), "22\n").unwrap();
         e.bk().args(["add", "nv", "-s", "t", "--cwd", &dir, "-r", "node=auto", "node --version"]).assert().success();
         e.bk().arg("nv").assert().success().stdout(contains("v22."));
     }

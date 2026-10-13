@@ -15,6 +15,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api, copyText, pickFolder } from "../lib/api";
+import { contractHome, isAbsolutePath, isMod, kbd, trayName } from "../lib/platform";
 import { allTags, keys, useFolderScan, useInventory, useLibrary, useRemoteFolder, useServerInventory, useServers } from "../lib/queries";
 import { folderFromRemote, inventoryFromRemote } from "../lib/remote";
 import { useRuns } from "../stores/runs";
@@ -139,7 +140,7 @@ function toBookmark(d: Draft): Bookmark {
 function scanPath(d: Draft, projectDir: string | null): string | undefined {
   const c = d.cwd.trim();
   if (!c) return projectDir ?? undefined;
-  if (c.startsWith("/") || c.startsWith("~")) return c;
+  if (isAbsolutePath(c)) return c;
   return projectDir ? `${projectDir}/${c}` : undefined;
 }
 
@@ -264,7 +265,7 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
   // ⌘S save, ⌘↩ run
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey)) return;
+      if (!isMod(e)) return;
       if (e.key === "s") {
         e.preventDefault();
         if (canSave) void save();
@@ -319,7 +320,7 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
           <Badge tone={draft.file ? "accent" : "neutral"}>{locationLabel}</Badge>
           {dirty && !isNew && <span className="text-xs text-faint">Edited</span>}
         </div>
-        <IconButton label={draft.pinned ? "Unpin" : "Pin to top & menu bar"} onClick={togglePin}>
+        <IconButton label={draft.pinned ? "Unpin" : `Pin to top & ${trayName}`} onClick={togglePin}>
           {draft.pinned ? <PinOff size={15} /> : <Pin size={15} />}
         </IconButton>
         {!isNew && remote && (
@@ -350,7 +351,7 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
         )}
         <Button variant="run" onClick={run} disabled={commandMissing || !!nameErr} className="ml-1">
           <Play size={12} fill="currentColor" /> Run
-          <span className="ml-0.5 text-[11px] opacity-75">⌘↩</span>
+          <span className="ml-0.5 text-[11px] opacity-75">{kbd("Mod+Enter")}</span>
         </Button>
       </header>
 
@@ -435,7 +436,7 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
                 onClick={async () => {
                   const p = await pickFolder(scanPath(draft, projectDir));
                   if (!p) return;
-                  set("cwd", p.startsWith(lib.home + "/") ? "~" + p.slice(lib.home.length) : p);
+                  set("cwd", contractHome(p, lib.home));
                 }}
               >
                 <FolderOpen size={13} /> Choose…
@@ -607,7 +608,7 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
             </Button>
           )}
           <Button variant="primary" disabled={!canSave} onClick={() => void save()}>
-            {saving ? "Saving…" : "Save"} <Kbd className="border-transparent bg-black/10 text-current">⌘S</Kbd>
+            {saving ? "Saving…" : "Save"} <Kbd className="border-transparent bg-black/10 text-current">{kbd("Mod+S")}</Kbd>
           </Button>
         </footer>
       )}

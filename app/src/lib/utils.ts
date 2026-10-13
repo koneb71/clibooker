@@ -36,7 +36,7 @@ export function envShort(spec?: EnvSpec | null): { kind: string; detail?: string
   if (!spec || spec.type === "inherit") return null;
   switch (spec.type) {
     case "conda":
-      return { kind: "conda", detail: spec.name ?? spec.prefix?.split("/").pop() };
+      return { kind: "conda", detail: spec.name ?? spec.prefix?.split(/[\\/]/).pop() };
     case "venv":
       return { kind: "venv", detail: spec.path };
     case "pyenv":
@@ -98,4 +98,4 @@ export function nameError(name: string): string | null {
   return null;
 }
 
-export const isMac = typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
+export { isMac } from "./platform";

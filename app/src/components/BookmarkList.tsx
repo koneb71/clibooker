@@ -1,6 +1,7 @@
 import { Globe, PackageOpen, Pin, Play, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 import { matchesSearch, sortEntries, useLibrary } from "../lib/queries";
+import { isMac, isMod, kbd } from "../lib/platform";
 import { requestRun } from "../lib/run";
 import type { Entry } from "../lib/types";
 import { cn, relativeTime } from "../lib/utils";
@@ -71,10 +72,10 @@ export function BookmarkList() {
   );
   const projectName = filter.kind === "project" ? lib?.projects.find((p) => p.file === filter.file)?.name : undefined;
 
-  // ⌘F / ⌘K focus search
+  // ⌘F / ⌘K (Ctrl+F / Ctrl+K) focus search
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === "f" || e.key === "k")) {
+      if (isMod(e) && (e.key === "f" || e.key === "k") && (isMac || !(e.target as Element | null)?.closest?.(".xterm"))) {
         e.preventDefault();
         searchRef.current?.focus();
         searchRef.current?.select();
@@ -115,7 +116,7 @@ export function BookmarkList() {
         >
           <PackageOpen size={16} />
         </IconButton>
-        <IconButton label="New bookmark" shortcut="⌘N" onClick={() => newBookmark()}>
+        <IconButton label="New bookmark" shortcut={kbd("Mod+N")} onClick={() => newBookmark()}>
           <Plus size={16} />
         </IconButton>
       </header>
@@ -134,7 +135,7 @@ export function BookmarkList() {
             spellCheck={false}
             className="h-7 w-full rounded-md border border-line bg-raised pr-12 pl-7 text-[13px] outline-none placeholder:text-faint focus:border-accent focus:ring-3 focus:ring-accent-soft"
           />
-          <Kbd className="absolute top-1/2 right-1.5 -translate-y-1/2">⌘K</Kbd>
+          <Kbd className="absolute top-1/2 right-1.5 -translate-y-1/2">{kbd("Mod+K")}</Kbd>
         </div>
       </div>
 

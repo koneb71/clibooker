@@ -1,6 +1,7 @@
 //! Menu-bar icon with pinned/recent bookmarks and running jobs.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bk_core::history;
 use tauri::image::Image;
@@ -13,18 +14,30 @@ use crate::runs::Status;
 use crate::state::AppState;
 
 const TRAY_ID: &str = "main";
+/// macOS menu bars want a black template glyph; Windows taskbars and Linux panels a colored icon.
+#[cfg(target_os = "macos")]
 const ICON: &[u8] = include_bytes!("../icons/tray-template.png");
+#[cfg(not(target_os = "macos"))]
+const ICON: &[u8] = include_bytes!("../icons/32x32.png");
+
+static AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the tray icon exists (Linux desktops without an AppIndicator host have none).
+pub fn available() -> bool {
+    AVAILABLE.load(Ordering::Relaxed)
+}
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app)?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(Image::from_bytes(ICON)?)
-        .icon_as_template(true)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("Clibooker")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| handle(app, event.id().as_ref()))
         .build(app)?;
+    AVAILABLE.store(true, Ordering::Relaxed);
     Ok(())
 }
 

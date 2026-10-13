@@ -6,40 +6,56 @@
 pub mod conda;
 pub mod detect;
 pub mod discover;
+mod key;
 pub mod login;
 pub mod runtimes;
 pub mod venv;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+pub use key::EnvKey;
+
 use crate::model::EnvSpec;
 use crate::paths;
 
-pub type EnvMap = BTreeMap<OsString, OsString>;
+/// An environment: variable name → value. Names compare case-insensitively on Windows.
+pub type EnvMap = BTreeMap<EnvKey, OsString>;
 
 pub fn current() -> EnvMap {
-    std::env::vars_os().collect()
+    std::env::vars_os().map(|(k, v)| (EnvKey::from(k), v)).collect()
+}
+
+/// Build an env from `(name, value)` pairs.
+pub fn from_pairs<K: Into<EnvKey>, V: Into<OsString>>(pairs: impl IntoIterator<Item = (K, V)>) -> EnvMap {
+    pairs.into_iter().map(|(k, v)| (k.into(), v.into())).collect()
 }
 
 pub fn get<'a>(env: &'a EnvMap, key: &str) -> Option<&'a OsStr> {
-    env.get(OsStr::new(key)).map(OsString::as_os_str).filter(|v| !v.is_empty())
+    env.get(&EnvKey::from(key)).map(OsString::as_os_str).filter(|v| !v.is_empty())
 }
 
 pub fn get_string(env: &EnvMap, key: &str) -> Option<String> {
     get(env, key).map(|v| v.to_string_lossy().into_owned())
 }
 
-pub fn set(env: &mut EnvMap, key: &str, value: impl Into<OsString>) {
-    env.insert(key.into(), value.into());
+/// Set a variable, keeping the existing spelling of its name (e.g. Windows' `Path`).
+pub fn set(env: &mut EnvMap, key: impl Into<EnvKey>, value: impl Into<OsString>) {
+    let key = key.into();
+    let value = value.into();
+    match env.get_mut(&key) {
+        Some(v) => *v = value,
+        None => {
+            env.insert(key, value);
+        }
+    }
 }
 
 pub fn unset(env: &mut EnvMap, key: &str) {
-    env.remove(OsStr::new(key));
+    env.remove(&EnvKey::from(key));
 }
 
 pub fn path_entries(env: &EnvMap) -> Vec<PathBuf> {
@@ -48,14 +64,14 @@ pub fn path_entries(env: &EnvMap) -> Vec<PathBuf> {
 
 fn set_path_entries(env: &mut EnvMap, entries: &[PathBuf]) {
     if let Ok(joined) = std::env::join_paths(entries) {
-        env.insert("PATH".into(), joined);
+        set(env, "PATH", joined);
     }
 }
 
 /// Put `dir` first on PATH (removing any later duplicate).
 pub fn prepend_path(env: &mut EnvMap, dir: &Path) {
     let mut entries = path_entries(env);
-    entries.retain(|e| e != dir);
+    entries.retain(|e| !paths::same_path(e, dir));
     entries.insert(0, dir.to_path_buf());
     set_path_entries(env, &entries);
 }
@@ -63,13 +79,31 @@ pub fn prepend_path(env: &mut EnvMap, dir: &Path) {
 /// Find an executable on the env's PATH.
 pub fn which_in(env: &EnvMap, program: &str) -> Option<PathBuf> {
     let path = get(env, "PATH")?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| paths::home());
     which::which_in(program, Some(path), cwd).ok()
 }
 
 /// Keys never passed to children.
-fn is_internal(key: &OsStr) -> bool {
-    key.as_bytes().starts_with(b"BK_")
+fn is_internal(key: &EnvKey) -> bool {
+    key.starts_with("BK_")
+}
+
+/// Directories an active conda env (`conda = true`) or venv put on PATH.
+fn activated_dirs(prefix: &Path, conda: bool) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        let mut v = vec![prefix.join("Scripts"), prefix.join("bin")];
+        if conda {
+            v.extend([
+                prefix.to_path_buf(),
+                prefix.join("Library").join("mingw-w64").join("bin"),
+                prefix.join("Library").join("usr").join("bin"),
+                prefix.join("Library").join("bin"),
+            ]);
+        }
+        v
+    } else {
+        vec![prefix.join("bin")]
+    }
 }
 
 /// Strip any active conda env / venv so activation starts from a neutral state.
@@ -77,31 +111,30 @@ fn is_internal(key: &OsStr) -> bool {
 pub fn clean(base: &EnvMap) -> EnvMap {
     let mut drop_dirs: Vec<PathBuf> = Vec::new();
     for (k, v) in base {
-        let kb = k.as_bytes();
-        if (kb.starts_with(b"CONDA_PREFIX") || kb == b"VIRTUAL_ENV") && !v.is_empty() {
-            drop_dirs.push(Path::new(v).join("bin"));
+        if v.is_empty() {
+            continue;
+        }
+        if k.starts_with("CONDA_PREFIX") {
+            drop_dirs.extend(activated_dirs(Path::new(v), true));
+        } else if k.is("VIRTUAL_ENV") {
+            drop_dirs.extend(activated_dirs(Path::new(v), false));
         }
     }
+    const DROP: &[&str] = &[
+        "CONDA_SHLVL",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PROMPT_MODIFIER",
+        "VIRTUAL_ENV",
+        "VIRTUAL_ENV_PROMPT",
+        "PYTHONHOME",
+    ];
     let mut env: EnvMap = base
         .iter()
-        .filter(|(k, _)| {
-            let kb = k.as_bytes();
-            !(kb.starts_with(b"CONDA_PREFIX")
-                || is_internal(k)
-                || matches!(
-                    kb,
-                    b"CONDA_SHLVL"
-                        | b"CONDA_DEFAULT_ENV"
-                        | b"CONDA_PROMPT_MODIFIER"
-                        | b"VIRTUAL_ENV"
-                        | b"VIRTUAL_ENV_PROMPT"
-                        | b"PYTHONHOME"
-                ))
-        })
+        .filter(|(k, _)| !(k.starts_with("CONDA_PREFIX") || is_internal(k) || DROP.iter().any(|d| k.is(d))))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let mut entries = path_entries(&env);
-    entries.retain(|e| !drop_dirs.contains(e));
+    entries.retain(|e| !drop_dirs.iter().any(|d| paths::same_path(e, d)));
     set_path_entries(&mut env, &entries);
     env
 }
@@ -154,7 +187,9 @@ pub fn activate(spec: &EnvSpec, cwd: &Path, base: &EnvMap, mode: Mode) -> Result
                 }
                 Mode::Check => {
                     let mut e = cleaned;
-                    prepend_path(&mut e, &target_prefix.join("bin"));
+                    for dir in activated_dirs(&target_prefix, true).iter().rev() {
+                        prepend_path(&mut e, dir);
+                    }
                     set(&mut e, "CONDA_PREFIX", target_prefix.as_os_str());
                     e
                 }
@@ -197,7 +232,7 @@ pub fn activate(spec: &EnvSpec, cwd: &Path, base: &EnvMap, mode: Mode) -> Result
             let vars = mise_env(cwd, &env)?;
             let n = vars.len();
             for (k, v) in vars {
-                env.insert(k.into(), v.into());
+                set(&mut env, k, v);
             }
             (env, format!("mise tools for this folder ({n} variables)"), spec.clone())
         }
@@ -223,7 +258,7 @@ pub fn activate(spec: &EnvSpec, cwd: &Path, base: &EnvMap, mode: Mode) -> Result
 /// `mise env --json` in `cwd`: the variables mise would set for the folder's tools.
 fn mise_env(cwd: &Path, env: &EnvMap) -> Result<BTreeMap<String, String>> {
     let mise = which_in(env, "mise").context("mise not found on PATH")?;
-    let out = std::process::Command::new(mise)
+    let out = crate::proc::background(mise)
         .args(["env", "--json"])
         .current_dir(cwd)
         .env_clear()
@@ -246,7 +281,28 @@ pub fn parse_env0(bytes: &[u8]) -> EnvMap {
             if eq == 0 {
                 return None;
             }
-            Some((OsString::from_vec(rec[..eq].to_vec()), OsString::from_vec(rec[eq + 1..].to_vec())))
+            Some((EnvKey::from(os_from_bytes(&rec[..eq])), os_from_bytes(&rec[eq + 1..])))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn os_from_bytes(b: &[u8]) -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+    OsString::from_vec(b.to_vec())
+}
+
+#[cfg(not(unix))]
+fn os_from_bytes(b: &[u8]) -> OsString {
+    String::from_utf8_lossy(b).into_owned().into()
+}
+
+/// Parse `set` output from cmd.exe (`KEY=VALUE` per line; names starting with `=` are cmd internals).
+pub fn parse_set_output(text: &str) -> EnvMap {
+    text.lines()
+        .filter_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            (!k.is_empty()).then(|| (EnvKey::from(k), OsString::from(v.trim_end_matches('\r'))))
         })
         .collect()
 }
@@ -256,9 +312,10 @@ mod tests {
     use super::*;
 
     fn map(pairs: &[(&str, &str)]) -> EnvMap {
-        pairs.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect()
+        from_pairs(pairs.iter().copied())
     }
 
+    #[cfg(unix)]
     #[test]
     fn clean_strips_active_envs() {
         let base = map(&[
@@ -292,8 +349,35 @@ mod tests {
 
     #[test]
     fn prepend_dedupes() {
-        let mut e = map(&[("PATH", "/a:/b")]);
+        let joined = |v: &[&str]| std::env::join_paths(v).unwrap().into_string().unwrap();
+        let mut e = map(&[("PATH", &joined(&["/a", "/b"]))]);
         prepend_path(&mut e, Path::new("/b"));
-        assert_eq!(get_string(&e, "PATH").unwrap(), "/b:/a");
+        assert_eq!(get_string(&e, "PATH").unwrap(), joined(&["/b", "/a"]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_spelling_and_clean() {
+        let mut e = map(&[
+            ("Path", r"C:\c\envs\x;C:\c\envs\x\Library\bin;C:\c\envs\x\Scripts;C:\v\Scripts;C:\c\condabin;C:\Windows"),
+            ("CONDA_PREFIX", r"C:\c\envs\x"),
+            ("VIRTUAL_ENV", r"C:\v"),
+            ("bk_internal", "1"),
+        ]);
+        let c = clean(&e);
+        assert_eq!(get_string(&c, "PATH").unwrap(), r"C:\c\condabin;C:\Windows");
+        assert!(get(&c, "bk_internal").is_none());
+        prepend_path(&mut e, Path::new(r"c:\windows\"));
+        // One variable, still spelled `Path`, and the case-insensitive duplicate is gone.
+        assert_eq!(e.keys().filter(|k| k.is("PATH")).count(), 1);
+        assert!(e.contains_key(&EnvKey::from("Path")));
+        assert_eq!(path_entries(&e).iter().filter(|p| paths::same_path(p, Path::new(r"C:\Windows"))).count(), 1);
+    }
+
+    #[test]
+    fn set_output_parsing() {
+        let e = parse_set_output("=C:=C:\\x\r\nPath=C:\\a;C:\\b\r\nCONDA_PREFIX=C:\\c\r\n");
+        assert_eq!(get_string(&e, "CONDA_PREFIX").unwrap(), "C:\\c");
+        assert_eq!(e.len(), 2);
     }
 }

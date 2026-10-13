@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, copyText, inTauri } from "../lib/api";
 import { keys, useInventory, useLibrary } from "../lib/queries";
+import { isLinux, isMac, isWindows, kbd, shellSetup, trayName } from "../lib/platform";
 import type { Settings } from "../lib/types";
 import { useTheme } from "../stores/theme";
 import { Button, Field, IconButton, Input, Select, Switch } from "../components/ui";
@@ -22,7 +23,9 @@ function Group({ title, description, children }: { title: string; description?: 
 
 /** Turn a keydown into a Tauri accelerator string like "Alt+Space". */
 function accelerator(e: React.KeyboardEvent): string | null {
-  const mods = [e.metaKey && "Cmd", e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift"].filter(Boolean) as string[];
+  const mods = [e.metaKey && (isMac ? "Cmd" : "Super"), e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift"].filter(
+    Boolean,
+  ) as string[];
   const code = e.code;
   let key: string | null = null;
   if (code === "Space") key = "Space";
@@ -34,15 +37,51 @@ function accelerator(e: React.KeyboardEvent): string | null {
   return [...mods, key].join("+");
 }
 
-function prettyHotkey(h: string) {
-  return h
-    .replace(/Cmd|CmdOrCtrl|Super/g, "⌘")
-    .replace(/Ctrl/g, "⌃")
-    .replace(/Alt|Option/g, "⌥")
-    .replace(/Shift/g, "⇧")
-    .replace(/\+/g, "")
-    .replace("Space", " Space");
+const prettyHotkey = kbd;
+
+/** Step shells offered per platform ("" = the default). */
+function shellOptions(userShell: string): [string, string][] {
+  if (isWindows) {
+    return [
+      ["", "PowerShell (pwsh if installed)"],
+      ["pwsh", "PowerShell 7 (pwsh)"],
+      ["powershell", "Windows PowerShell 5.1"],
+      ["cmd", "Command Prompt (cmd)"],
+      ["bash", "Git Bash"],
+    ];
+  }
+  const fallback = userShell === "zsh" || userShell === "bash" ? userShell : "sh";
+  return [
+    ["", `Your login shell (${fallback})`],
+    ["zsh", "zsh"],
+    ["bash", "bash"],
+    ["sh", "sh"],
+  ];
 }
+
+const TERMINALS: [string, string][] = isMac
+  ? [
+      ["terminal", "Terminal"],
+      ["iterm", "iTerm"],
+      ["ghostty", "Ghostty"],
+      ["warp", "Warp"],
+    ]
+  : isWindows
+    ? [
+        ["windows-terminal", "Windows Terminal"],
+        ["powershell", "PowerShell window"],
+      ]
+    : [
+        ["auto", "Automatic"],
+        ["gnome-terminal", "GNOME Terminal"],
+        ["konsole", "Konsole"],
+        ["xfce4-terminal", "Xfce Terminal"],
+        ["kitty", "kitty"],
+        ["alacritty", "Alacritty"],
+        ["wezterm", "WezTerm"],
+        ["ghostty", "Ghostty"],
+        ["xterm", "xterm"],
+      ];
 
 export function SettingsView() {
   const { data: lib } = useLibrary();
@@ -72,7 +111,8 @@ export function SettingsView() {
     }
   };
 
-  const hotkey = s.hotkey ?? "Alt+Space";
+  const hotkey = s.hotkey ?? lib.default_hotkey;
+  const setup = shellSetup(lib.shell);
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-bg">
@@ -112,7 +152,14 @@ export function SettingsView() {
             </Field>
           </Group>
 
-          <Group title="Quick run" description="A Spotlight-style launcher for your bookmarks, from anywhere.">
+          <Group
+            title="Quick run"
+            description={
+              isMac
+                ? "A Spotlight-style launcher for your bookmarks, from anywhere."
+                : "A quick launcher for your bookmarks, from any app."
+            }
+          >
             <Field label="Global shortcut" error={hotkeyError}>
               <div className="flex items-center gap-2">
                 <button
@@ -141,23 +188,46 @@ export function SettingsView() {
                 <span className="text-xs text-faint">Click, then press the new combination</span>
               </div>
             </Field>
+            {isLinux && (
+              <p className="text-xs leading-relaxed text-muted">
+                On Wayland, global shortcuts are up to your desktop: add a custom shortcut in its keyboard settings that runs{" "}
+                <code className="selectable font-mono text-fg">Clibooker --palette</code>.
+              </p>
+            )}
           </Group>
 
           <Group title="Running" description="How bookmarks run inside Clibooker and the bk CLI.">
-            <Field label="Default shell" hint="Steps run non-interactively, without your .zshrc (aliases aren't available).">
-              <Select className="w-[200px]" value={s.shell ?? ""} onChange={(e) => void save({ shell: e.target.value || undefined })}>
-                <option value="">From $SHELL (zsh)</option>
-                <option value="zsh">zsh</option>
-                <option value="bash">bash</option>
-                <option value="sh">sh</option>
+            <Field
+              label="Default shell"
+              hint={
+                isWindows
+                  ? "Steps run without your PowerShell profile (its functions and aliases aren't available)."
+                  : `Steps run non-interactively, without your ${setup.file} (aliases aren't available).`
+              }
+            >
+              <Select className="w-[240px]" value={s.shell ?? ""} onChange={(e) => void save({ shell: e.target.value || undefined })}>
+                {shellOptions(lib.shell).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
               </Select>
             </Field>
-            <Field label="ssh program" hint="Default /usr/bin/ssh (understands macOS Keychain). Change it if you use Homebrew's OpenSSH.">
+            <Field
+              label="ssh program"
+              hint={
+                isMac
+                  ? "Default /usr/bin/ssh (understands macOS Keychain). Change it if you use Homebrew's OpenSSH."
+                  : isWindows
+                    ? "Default: Windows' built-in OpenSSH."
+                    : "Default /usr/bin/ssh."
+              }
+            >
               <Input
                 mono
                 className="w-[320px]"
                 defaultValue={s.ssh ?? ""}
-                placeholder="/usr/bin/ssh"
+                placeholder={isWindows ? "C:\\Windows\\System32\\OpenSSH\\ssh.exe" : "/usr/bin/ssh"}
                 onBlur={(e) => {
                   const v = e.target.value.trim();
                   if (v !== (s.ssh ?? "")) void save({ ssh: v || undefined });
@@ -189,12 +259,20 @@ export function SettingsView() {
                 </div>
               </Field>
             ) : null}
-            <Field label="Pop-out terminal" hint="Used by “Open in terminal”.">
-              <Select className="w-[200px]" value={s.terminal ?? "terminal"} onChange={(e) => void save({ terminal: e.target.value })}>
-                <option value="terminal">Terminal</option>
-                <option value="iterm">iTerm</option>
-                <option value="ghostty">Ghostty</option>
-                <option value="warp">Warp</option>
+            <Field
+              label="Pop-out terminal"
+              hint={isLinux ? "Used by “Open in terminal”. Automatic uses $TERMINAL, then the first one installed." : "Used by “Open in terminal”."}
+            >
+              <Select
+                className="w-[240px]"
+                value={s.terminal ?? lib.default_terminal}
+                onChange={(e) => void save({ terminal: e.target.value })}
+              >
+                {TERMINALS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
               </Select>
             </Field>
             <Switch
@@ -210,18 +288,22 @@ export function SettingsView() {
                   setReloading(true);
                   try {
                     const n = await api.reloadShellEnv();
-                    toast.success(`Reloaded shell environment (${n} variables)`);
+                    toast.success(`Reloaded ${isWindows ? "the" : "shell"} environment (${n} variables)`);
                     qc.invalidateQueries({ queryKey: keys.inventory });
                   } catch (e) {
-                    toast.error("Could not read your login shell", { description: String(e) });
+                    toast.error(isWindows ? "Could not read your environment" : "Could not read your login shell", {
+                      description: String(e),
+                    });
                   } finally {
                     setReloading(false);
                   }
                 }}
               >
-                <RefreshCw size={13} className={reloading ? "animate-spin" : ""} /> Reload shell environment
+                <RefreshCw size={13} className={reloading ? "animate-spin" : ""} /> Reload {isWindows ? "" : "shell "}environment
               </Button>
-              <span className="text-xs text-faint">After editing ~/.zshrc (PATH, conda init…)</span>
+              <span className="text-xs text-faint">
+                {isWindows ? "After installing tools or changing environment variables" : `After editing ${setup.file} (PATH, conda init…)`}
+              </span>
             </div>
             {inventory && (
               <p className="text-xs leading-relaxed text-muted">
@@ -244,17 +326,25 @@ export function SettingsView() {
                 void save({ launch_at_login: v });
               }}
               label="Launch at login"
-              hint="Starts in the menu bar so the quick-run shortcut always works"
+              hint={`Starts in the ${trayName} so the quick-run shortcut always works`}
             />
             <Switch
-              checked={s.show_in_dock ?? true}
-              onChange={async (v) => {
-                await api.setDockVisible(v).catch(() => {});
-                void save({ show_in_dock: v });
-              }}
-              label="Show in Dock"
-              hint="When off, Clibooker lives only in the menu bar"
+              checked={s.keep_running ?? true}
+              onChange={(keep_running) => void save({ keep_running })}
+              label="Keep running when the window is closed"
+              hint={`Runs continue and the quick-run shortcut keeps working; quit from the ${trayName}.`}
             />
+            {isMac && (
+              <Switch
+                checked={s.show_in_dock ?? true}
+                onChange={async (v) => {
+                  await api.setDockVisible(v).catch(() => {});
+                  void save({ show_in_dock: v });
+                }}
+                label="Show in Dock"
+                hint="When off, Clibooker lives only in the menu bar"
+              />
+            )}
           </Group>
 
           <Group title="Projects" description="Repos with a .bk.toml. Their bookmarks live in the repo and can be committed.">
@@ -301,7 +391,9 @@ export function SettingsView() {
                     </span>
                   )}
                   {cli.linked && !cli.link_dir_on_path && (
-                    <p className="mt-1 text-warn">Add ~/.local/bin to your PATH to use it.</p>
+                    <p className="mt-1 text-warn">
+                      {isWindows ? "Open a new terminal to use it." : "Add ~/.local/bin to your PATH to use it."}
+                    </p>
                   )}
                 </div>
                 {cli.bundled && !cli.linked && (
@@ -310,7 +402,7 @@ export function SettingsView() {
                     onClick={async () => {
                       try {
                         const where = await api.installCli();
-                        toast.success(`Linked bk to ${where}`);
+                        toast.success(isWindows ? `Added ${where} to your PATH` : `Installed bk at ${where}`);
                         await api.reloadShellEnv().catch(() => {});
                         void refetchCli();
                       } catch (e) {
@@ -318,13 +410,13 @@ export function SettingsView() {
                       }
                     }}
                   >
-                    Install bk command
+                    {isWindows ? "Add bk to PATH" : "Install bk command"}
                   </Button>
                 )}
               </div>
             )}
             {[
-              ["Add to ~/.zshrc", 'eval "$(bk init zsh)"'],
+              [`Add to ${setup.file}`, setup.line],
               ["Bookmarks file", lib.global_file],
             ].map(([label, value]) => (
               <Field key={label} label={label}>

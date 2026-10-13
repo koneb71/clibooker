@@ -348,7 +348,7 @@ fn inline_nested(t: &mut Table) {
 /// Lock, read, mutate, and atomically write back a TOML document.
 fn edit_document<T>(file: &Path, f: impl FnOnce(&mut DocumentMut) -> Result<T>) -> Result<T> {
     // Write through symlinks (dotfile managers) instead of replacing the link.
-    let target = fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    let target = dunce::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let dir = target.parent().context("file has no parent directory")?;
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 

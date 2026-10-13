@@ -431,7 +431,7 @@ pub fn show(ctx: &Ctx, name: &str) -> Result<i32> {
         .into_iter()
         .map(|p| (p.name.clone(), p.default.unwrap_or_else(|| format!("<{}>", p.name))))
         .collect();
-    if let Ok(line) = render::one_liner(e, &defaults, &[], &ctx.cwd, &ctx.env) {
+    if let Ok(line) = render::one_liner_for(render::Dialect::native(), e, &defaults, &[], &ctx.cwd, &ctx.env) {
         eprintln!("{}{}", style("  shell   ").dim(), line);
     }
     Ok(0)
@@ -522,7 +522,7 @@ pub fn run(ctx: &Ctx, r: RunArgs) -> Result<i32> {
         return crate::remote_cmds::run(ctx, &lib, e, &req, r.dry_run, r.print, e.bookmark.confirm && !r.yes);
     }
     if r.print {
-        println!("{}", render::one_liner(e, &req.params, &r.extra, &ctx.cwd, &ctx.env)?);
+        println!("{}", render::one_liner_for(render::Dialect::native(), e, &req.params, &r.extra, &ctx.cwd, &ctx.env)?);
         return Ok(0);
     }
     let mode = if r.dry_run { Mode::Check } else { Mode::Run };

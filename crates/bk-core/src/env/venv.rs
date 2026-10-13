@@ -1,7 +1,7 @@
 //! Native activation for virtualenvs (venv, uv, poetry) and pyenv.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 
@@ -9,14 +9,24 @@ use super::{EnvMap, get, prepend_path, set, unset};
 use crate::paths;
 
 pub fn is_venv(dir: &Path) -> bool {
-    dir.join("pyvenv.cfg").is_file() || dir.join("bin/python").exists()
+    dir.join("pyvenv.cfg").is_file()
+        || dir.join("bin").join("python").exists()
+        || dir.join("Scripts").join("python.exe").exists()
+}
+
+/// A venv's executables folder: `Scripts` for Windows Python, `bin` elsewhere (and for
+/// MSYS2/Cygwin Python on Windows).
+pub fn bin_dir(venv: &Path) -> PathBuf {
+    let scripts = venv.join("Scripts");
+    let bin = venv.join("bin");
+    if scripts.is_dir() || (cfg!(windows) && !bin.is_dir()) { scripts } else { bin }
 }
 
 /// What `source <venv>/bin/activate` does, minus the prompt.
 pub fn apply(env: &mut EnvMap, venv: &Path) {
     set(env, "VIRTUAL_ENV", venv.as_os_str());
     unset(env, "PYTHONHOME");
-    prepend_path(env, &venv.join("bin"));
+    prepend_path(env, &bin_dir(venv));
 }
 
 /// The project root uv would use: nearest ancestor with a `pyproject.toml`, else `cwd`.
@@ -37,7 +47,7 @@ pub fn uv_env_dir(cwd: &Path, env: &EnvMap) -> PathBuf {
 pub fn poetry_env_dir(cwd: &Path, env: &EnvMap) -> Result<PathBuf> {
     let in_project = cwd.join(".venv");
     let poetry = super::which_in(env, "poetry").context("poetry not found on PATH")?;
-    let out = Command::new(poetry)
+    let out = crate::proc::background(poetry)
         .args(["env", "info", "--path"])
         .current_dir(cwd)
         .env_clear()
@@ -82,7 +92,8 @@ mod tests {
     fn apply_sets_path_and_virtual_env() {
         let mut env: EnvMap = [("PATH".into(), OsString::from("/usr/bin")), ("PYTHONHOME".into(), "/x".into())].into();
         apply(&mut env, Path::new("/p/.venv"));
-        assert_eq!(super::super::get_string(&env, "PATH").unwrap(), "/p/.venv/bin:/usr/bin");
+        let expected = std::env::join_paths([bin_dir(Path::new("/p/.venv")), "/usr/bin".into()]).unwrap();
+        assert_eq!(super::super::get(&env, "PATH").unwrap(), expected);
         assert_eq!(super::super::get_string(&env, "VIRTUAL_ENV").unwrap(), "/p/.venv");
         assert!(super::super::get(&env, "PYTHONHOME").is_none());
     }

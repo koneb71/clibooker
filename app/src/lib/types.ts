@@ -96,6 +96,8 @@ export interface Settings {
   show_in_dock?: boolean;
   terminal_font_size?: number;
   ssh?: string;
+  /** Keep running in the menu bar / tray when the window closes (default true). */
+  keep_running?: boolean;
   /** ~/.ssh/config hosts left out of the server lists (they still work by name). */
   hidden_servers?: string[];
 }
@@ -113,6 +115,11 @@ export interface Library {
   global_file: string;
   home: string;
   projects: Project[];
+  platform: "macos" | "linux" | "windows";
+  default_hotkey: string;
+  default_terminal: string;
+  /** The user's shell for setup instructions: zsh, bash, powershell, ... */
+  shell: string;
 }
 
 export interface CondaEnv {

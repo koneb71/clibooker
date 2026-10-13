@@ -64,6 +64,11 @@ pub struct LibraryDto {
     global_file: String,
     home: String,
     projects: Vec<ProjectDto>,
+    /// `macos`, `linux` or `windows`.
+    platform: &'static str,
+    default_hotkey: &'static str,
+    default_terminal: &'static str,
+    shell: String,
 }
 
 fn entry_dto(e: &Entry, shadowed: bool, trusted: bool, last_run: Option<RunRecord>) -> EntryDto {
@@ -120,7 +125,21 @@ pub fn get_library(app: AppHandle, state: State<'_, AppState>) -> LibraryDto {
         global_file: state.paths.config_file.display().to_string(),
         home: paths::home().display().to_string(),
         projects,
+        platform: std::env::consts::OS,
+        default_hotkey: crate::palette::DEFAULT_HOTKEY,
+        default_terminal: crate::external_term::default_terminal(),
+        shell: user_shell_name(&state.base_env()),
     }
+}
+
+/// The user's interactive shell, for setup instructions (`zsh`, `bash`, `powershell`, ...).
+fn user_shell_name(env: &bk_core::env::EnvMap) -> String {
+    if cfg!(windows) {
+        return "powershell".into();
+    }
+    bk_core::env::get_string(env, "SHELL")
+        .and_then(|s| s.rsplit('/').next().map(str::to_string))
+        .unwrap_or_else(|| "bash".into())
 }
 
 /// `file` = None means the global file.
@@ -239,7 +258,7 @@ pub async fn preview_bookmark(
         }
         return Ok(out);
     }
-    out.one_liner = render::one_liner(&entry, &values, &[], &home, &base).ok();
+    out.one_liner = render::one_liner_for(render::Dialect::native(), &entry, &values, &[], &home, &base).ok();
     let req = RunRequest { params: values, default_cwd: home, ..Default::default() };
     match plan::build(&entry, &req, &base, &lib.settings, Mode::Check) {
         Ok(p) => out.plan = Some(p.summary()),
@@ -256,11 +275,7 @@ pub fn one_liner(state: State<'_, AppState>, id: String, params: BTreeMap<String
 }
 
 pub fn command_line(program: &str, args: &[String]) -> String {
-    std::iter::once(program.to_string())
-        .chain(args.iter().cloned())
-        .map(|a| render::q(&a))
-        .collect::<Vec<_>>()
-        .join(" ")
+    render::command_line(render::Dialect::native(), program, args)
 }
 
 /// Shell text that runs a bookmark: a subshell one-liner, or an `ssh …` command for remote ones.
@@ -284,7 +299,7 @@ pub fn one_liner_for(
         let p = remote::build(e, &req, &inp).map_err(anyhow_err)?;
         return Ok(command_line(&p.program, &p.args_with_forwards()));
     }
-    render::one_liner(e, params, &[], &paths::home(), &base).map_err(anyhow_err)
+    render::one_liner_for(render::Dialect::native(), e, params, &[], &paths::home(), &base).map_err(anyhow_err)
 }
 
 #[tauri::command]
@@ -294,7 +309,7 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> CmdResul
 
 #[tauri::command]
 pub async fn reload_shell_env(state: State<'_, AppState>) -> CmdResult<usize> {
-    state.load_base_env()
+    state.reload_base_env()
 }
 
 #[tauri::command]
@@ -474,21 +489,36 @@ pub struct CliStatus {
     on_path: Option<String>,
     /// The copy bundled inside this app, if any.
     bundled: Option<String>,
-    /// Where "Install" puts the link.
+    /// Where "Install" puts bk: a link in ~/.local/bin, or on Windows the app's folder, which
+    /// gets added to your PATH.
     link: String,
-    /// The link exists and points at this app's copy.
+    /// Installed from this app (the link points at it / the folder is on the user PATH).
     linked: bool,
-    /// Whether ~/.local/bin is on the login shell's PATH.
+    /// Whether the link's folder is on the login shell's PATH.
     link_dir_on_path: bool,
 }
 
 fn bundled_cli() -> Option<PathBuf> {
-    let p = std::env::current_exe().ok()?.with_file_name("bk");
+    let p = std::env::current_exe().ok()?.with_file_name(if cfg!(windows) { "bk.exe" } else { "bk" });
     p.is_file().then_some(p)
 }
 
 fn cli_link() -> PathBuf {
-    paths::home().join(".local/bin/bk")
+    if cfg!(windows) {
+        bundled_cli().and_then(|b| b.parent().map(Path::to_path_buf)).unwrap_or_default()
+    } else {
+        paths::home().join(".local/bin/bk")
+    }
+}
+
+/// An AppImage runs from a temporary mount, so a link to its `bk` would break; copy instead.
+fn is_appimage() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some()
+}
+
+/// Marker for a copy we made (AppImage), so reinstalling may replace it.
+fn copied_marker(state: &AppState) -> PathBuf {
+    state.paths.data_dir.join("bk-cli-copy")
 }
 
 #[tauri::command]
@@ -496,38 +526,133 @@ pub fn cli_status(state: State<'_, AppState>) -> CliStatus {
     let env = state.base_env();
     let bundled = bundled_cli();
     let link = cli_link();
-    let linked = match (std::fs::read_link(&link), &bundled) {
-        (Ok(target), Some(b)) => &target == b,
-        _ => false,
+    let on_path = bk_core::env::which_in(&env, "bk");
+    let (linked, link_dir) = if cfg!(windows) {
+        (user_path_has(&link), link.clone())
+    } else {
+        let linked = match (std::fs::read_link(&link), &bundled) {
+            (Ok(target), Some(b)) => &target == b,
+            _ => std::fs::read_to_string(copied_marker(&state)).is_ok_and(|m| Path::new(m.trim()) == link),
+        };
+        (linked, link.parent().map(Path::to_path_buf).unwrap_or_default())
     };
-    let link_dir = link.parent().map(Path::to_path_buf).unwrap_or_default();
+    // A package install (.deb/.rpm) puts the bundled bk on PATH itself, e.g. /usr/bin/bk.
+    let packaged = matches!((&on_path, &bundled), (Some(p), Some(b)) if paths::same_path(p, b));
     CliStatus {
-        on_path: bk_core::env::which_in(&env, "bk").map(|p| paths::contract_tilde(&p)),
+        on_path: on_path.map(|p| paths::contract_tilde(&p)),
         bundled: bundled.map(|p| p.display().to_string()),
         link: paths::contract_tilde(&link),
-        linked,
-        link_dir_on_path: bk_core::env::path_entries(&env).contains(&link_dir),
+        linked: linked || packaged,
+        link_dir_on_path: packaged || bk_core::env::path_entries(&env).iter().any(|e| paths::same_path(e, &link_dir)),
     }
 }
 
-/// Symlink the bundled `bk` into ~/.local/bin.
+/// Make `bk` available in terminals: link it into ~/.local/bin (copy for an AppImage), or on
+/// Windows add the app's folder to your user PATH.
 #[tauri::command]
-pub fn install_cli() -> CmdResult<String> {
+pub fn install_cli(state: State<'_, AppState>) -> CmdResult<String> {
     let src = bundled_cli()
         .ok_or("this build doesn't include the bk CLI; install it with `cargo install --path crates/bk-cli`")?;
     let link = cli_link();
+    if cfg!(windows) {
+        add_to_user_path(&link).map_err(anyhow_err)?;
+        return Ok(link.display().to_string());
+    }
     if let Some(dir) = link.parent() {
         std::fs::create_dir_all(dir).map_err(err)?;
     }
+    let ours = std::fs::read_to_string(copied_marker(&state)).is_ok_and(|m| Path::new(m.trim()) == link);
     match std::fs::symlink_metadata(&link) {
-        Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&link).map_err(err)?,
+        Ok(m) if m.file_type().is_symlink() || ours => std::fs::remove_file(&link).map_err(err)?,
         Ok(_) => {
             return Err(format!("{} already exists and isn't a link from Clibooker", paths::contract_tilde(&link)));
         }
         Err(_) => {}
     }
-    std::os::unix::fs::symlink(&src, &link).map_err(err)?;
+    if is_appimage() {
+        std::fs::copy(&src, &link).map_err(err)?;
+        std::fs::create_dir_all(&state.paths.data_dir).map_err(err)?;
+        std::fs::write(copied_marker(&state), link.display().to_string()).map_err(err)?;
+    } else {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&src, &link).map_err(err)?;
+    }
     Ok(paths::contract_tilde(&link))
+}
+
+#[cfg(windows)]
+fn read_user_path() -> anyhow::Result<(String, winreg::enums::RegType)> {
+    use winreg::RegKey;
+    use winreg::enums::*;
+    let env = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment")?;
+    match env.get_raw_value("Path") {
+        Ok(v) => {
+            let units: Vec<u16> = v.bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            Ok((String::from_utf16_lossy(&units).trim_end_matches('\0').to_string(), v.vtype))
+        }
+        Err(_) => Ok((String::new(), REG_EXPAND_SZ)),
+    }
+}
+
+fn user_path_has(dir: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        read_user_path().is_ok_and(|(p, _)| p.split(';').any(|e| paths::same_path(Path::new(e), dir)))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
+/// Append `dir` to the user PATH (`HKCU\Environment`), keeping `%VARS%` unexpanded, and tell
+/// running programs (Explorer, new terminals) that the environment changed.
+fn add_to_user_path(dir: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use winreg::enums::*;
+        use winreg::{RegKey, RegValue};
+        if user_path_has(dir) {
+            return Ok(());
+        }
+        let (current, vtype) = read_user_path()?;
+        let value = if current.is_empty() { dir.display().to_string() } else { format!("{current};{}", dir.display()) };
+        let mut bytes: Vec<u8> = value.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+        if bytes.is_empty() {
+            bytes.extend([0, 0]);
+        }
+        let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)?;
+        key.set_raw_value("Path", &RegValue { bytes: bytes.into(), vtype })?;
+        broadcast_env_change();
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        anyhow::bail!("only used on Windows")
+    }
+}
+
+#[cfg(windows)]
+fn broadcast_env_change() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
+    let name: Vec<u16> = "Environment".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut result = 0usize;
+    // SAFETY: a valid NUL-terminated string that outlives the call; the result pointer is ours.
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            name.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            5000,
+            &mut result,
+        );
+    }
 }
 
 // ---- project scripts ----

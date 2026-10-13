@@ -5,6 +5,7 @@ import { EnvBadge, StatusDot, statusOfExit } from "../components/bits";
 import { RuntimeBadges } from "../components/RuntimesEditor";
 import { Kbd } from "../components/ui";
 import { api, copyText, inTauri, on } from "../lib/api";
+import { isMac, isMod, kbd } from "../lib/platform";
 import { sortEntries, useBackendInvalidation, useLibrary, useServers } from "../lib/queries";
 import { prefillParams } from "../lib/run";
 import type { Entry } from "../lib/types";
@@ -100,10 +101,12 @@ export function PaletteApp() {
       return;
     }
     if (paramsFor) return;
-    if (e.key === "Enter" && (e.altKey || e.metaKey)) {
+    const input = e.target as HTMLInputElement;
+    const textSelected = !!window.getSelection()?.toString() || input.selectionStart !== input.selectionEnd;
+    if (e.key === "Enter" && (e.altKey || isMod(e))) {
       e.preventDefault();
       choose(byValue(value), e.altKey ? "background" : "terminal");
-    } else if (e.key === "c" && e.metaKey && !window.getSelection()?.toString()) {
+    } else if (e.key === "c" && isMod(e) && !textSelected) {
       e.preventDefault();
       choose(byValue(value), "copy");
     }
@@ -144,8 +147,14 @@ export function PaletteApp() {
         filter={paletteFilter}
         loop
         className={cn(
-          "flex h-full w-full flex-col overflow-hidden rounded-[14px] border border-line-strong text-fg",
-          inTauri ? "bg-bg/75" : "h-[440px] max-w-[680px] bg-bg shadow-2xl",
+          "flex h-full w-full flex-col overflow-hidden text-fg",
+          // macOS: a translucent rounded panel over the window's vibrancy. Elsewhere the window
+          // itself is the (opaque, square) panel.
+          !inTauri
+            ? "h-[440px] max-w-[680px] rounded-[14px] border border-line-strong bg-bg shadow-2xl"
+            : isMac
+              ? "rounded-[14px] border border-line-strong bg-bg/75"
+              : "border border-line-strong bg-bg",
         )}
       >
         {paramsFor ? (
@@ -199,9 +208,9 @@ export function PaletteApp() {
           ) : (
             <>
               <span className="flex items-center gap-1.5"><Kbd>↩</Kbd> Run</span>
-              <span className="flex items-center gap-1.5"><Kbd>⌥↩</Kbd> In background</span>
-              <span className="flex items-center gap-1.5"><Kbd>⌘↩</Kbd> In terminal</span>
-              <span className="flex items-center gap-1.5"><Kbd>⌘C</Kbd> Copy</span>
+              <span className="flex items-center gap-1.5"><Kbd>{kbd("Alt+Enter")}</Kbd> In background</span>
+              <span className="flex items-center gap-1.5"><Kbd>{kbd("Mod+Enter")}</Kbd> In terminal</span>
+              <span className="flex items-center gap-1.5"><Kbd>{kbd("Mod+C")}</Kbd> Copy</span>
               <span className="ml-auto flex items-center gap-1.5"><Kbd>esc</Kbd></span>
             </>
           )}

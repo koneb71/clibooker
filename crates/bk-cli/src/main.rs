@@ -15,7 +15,7 @@ use cli::{Cli, Cmd};
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match dispatch(cli.cmd) {
-        Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
+        Ok(code) => ExitCode::from(bk_core::proc::normalize_code(code) as u8),
         Err(e) => {
             if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                 let _ = console::Term::stderr().show_cursor();
@@ -31,6 +31,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<i32> {
     match &cmd {
         Some(Cmd::Init { shell, record }) => return shellcmds::init(*shell, *record),
         Some(Cmd::App) => return manage::app(),
+        Some(Cmd::RunSteps { file }) => return exec::run_steps_file(file),
         _ => {}
     }
     let ctx = commands::Ctx::new()?;
@@ -43,7 +44,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<i32> {
         Some(Cmd::Rm { names, yes }) => commands::rm(&ctx, &names, yes),
         Some(Cmd::Mv { old, new }) => commands::mv(&ctx, &old, &new),
         Some(Cmd::Save(a)) => shellcmds::save(&ctx, a),
-        Some(Cmd::Go { name, print }) => shellcmds::go(&ctx, &name, print),
+        Some(Cmd::Go { name, print, shell }) => shellcmds::go(&ctx, &name, print, shell),
         Some(Cmd::Edit { name, project }) => manage::edit(&ctx, name, project),
         Some(Cmd::History { name, limit, json }) => manage::history(&ctx, name.as_deref(), limit, json),
         Some(Cmd::Doctor) => manage::doctor(&ctx),
@@ -53,7 +54,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<i32> {
         Some(Cmd::Scan(a)) => manage::scan(&ctx, a),
         Some(Cmd::Server { cmd, check }) => remote_cmds::server(&ctx, cmd, check),
         Some(Cmd::Ssh { server, command }) => remote_cmds::ssh(&ctx, &server, &command),
-        Some(Cmd::Init { .. } | Cmd::App) => unreachable!("handled above"),
+        Some(Cmd::Init { .. } | Cmd::App | Cmd::RunSteps { .. }) => unreachable!("handled above"),
         Some(Cmd::External(args)) => {
             // `bk train k=v -- extra` → `bk run train k=v -- extra`
             let argv = ["bk", "run"].into_iter().map(String::from).chain(args);

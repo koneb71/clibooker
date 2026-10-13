@@ -1,12 +1,11 @@
 //! SSH: `bk server …`, `bk ssh`, and running / entering remote bookmarks.
 
 use std::collections::BTreeMap;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use bk_core::plan::RunRequest;
 use bk_core::remote::{self, RemoteInputs, RemotePlan};
+use bk_core::render::Dialect;
 use bk_core::servers::{self, Batch, Reach};
 use bk_core::{Entry, Library, Server, history, render, store};
 use console::style;
@@ -30,19 +29,14 @@ pub fn inputs<'a>(ctx: &'a Ctx, lib: &'a Library, online: bool) -> RemoteInputs<
     }
 }
 
-/// Shell-quoted command line, for `--print` and `bk go --print`.
+/// Shell-quoted command line, for `--print` (in this OS's shell language).
 pub fn command_line(program: &str, args: &[String]) -> String {
-    std::iter::once(program.to_string())
-        .chain(args.iter().cloned())
-        .map(|a| render::q(&a))
-        .collect::<Vec<_>>()
-        .join(" ")
+    render::command_line(Dialect::native(), program, args)
 }
 
-/// Replace this process with ssh (interactive sessions).
+/// Hand the terminal to ssh (interactive sessions).
 fn exec_ssh(program: &str, args: &[String], env: &bk_core::env::EnvMap) -> Result<i32> {
-    let err = Command::new(program).args(args).env_clear().envs(env).exec();
-    Err(err).with_context(|| format!("starting {program}"))
+    exec::replace_process(program, args, env)
 }
 
 pub fn print_plan(plan: &RemotePlan) {
@@ -124,12 +118,12 @@ pub fn run(
 }
 
 /// `bk go` for a remote bookmark: an interactive shell on the server in its folder and env.
-pub fn go(ctx: &Ctx, lib: &Library, e: &Entry, print: bool) -> Result<i32> {
+pub fn go(ctx: &Ctx, lib: &Library, e: &Entry, print: bool, dialect: Dialect) -> Result<i32> {
     let inp = inputs(ctx, lib, false);
     let (_, args) = remote::shell_here(e, &inp)?;
     let program = ssh_program(lib);
     if print {
-        println!("{}", command_line(&program, &args));
+        println!("{}", render::command_line(dialect, &program, &args));
         return Ok(0);
     }
     exec_ssh(&program, &args, &servers::ssh_env(&ctx.env))

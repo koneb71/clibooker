@@ -172,8 +172,10 @@ mod tests {
     #[test]
     fn reports_missing_things() {
         let d = tempfile::tempdir().unwrap();
-        let base: EnvMap =
-            [("PATH".into(), OsString::from("/usr/bin:/bin")), ("SHELL".into(), "/bin/zsh".into())].into();
+        let base: EnvMap = crate::env::from_pairs([
+            ("PATH", std::env::join_paths(["/usr/bin", "/bin"]).unwrap()),
+            ("SHELL", OsString::from("/bin/sh")),
+        ]);
         let good = Entry::new(
             "good",
             Scope::Global,

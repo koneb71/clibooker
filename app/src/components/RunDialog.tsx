@@ -3,6 +3,7 @@ import { Play, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import { contractHome } from "../lib/platform";
 import { keys, useEntry, useLibrary } from "../lib/queries";
 import type { PlanSummary } from "../lib/types";
 import { useRuns } from "../stores/runs";
@@ -86,7 +87,7 @@ export function RunDialog() {
           <div className="flex gap-2.5 rounded-lg border border-warn/30 bg-warn/10 p-3 text-xs leading-relaxed">
             <ShieldAlert size={16} className="mt-px shrink-0 text-warn" />
             <p>
-              This bookmark comes from <code className="selectable font-mono">{entry.file.replace(lib?.home ?? "~", "~")}</code>, which is
+              This bookmark comes from <code className="selectable font-mono">{contractHome(entry.file, lib?.home)}</code>, which is
               new or has changed since you last approved it. Project files can run any command, so check what runs below before
               trusting it.
             </p>

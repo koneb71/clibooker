@@ -3,8 +3,10 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
-  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Monaco, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue",
+    Cantarell, Ubuntu, "Noto Sans", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Cascadia Mono", Consolas, "JetBrains Mono", Menlo, Monaco, "DejaVu Sans Mono",
+    "Liberation Mono", "Noto Sans Mono", monospace;
 
   --color-bg: var(--c-bg);
   --color-panel: var(--c-panel);
@@ -98,9 +100,14 @@ body {
   overflow: hidden;
 }
 
-/* Browser preview (no native vibrancy): give the page a background. */
-html:not(.tauri) body {
+/* Browser preview, Windows and Linux (no native vibrancy): give the page a background, and
+   make the sidebar opaque. */
+html:not(.tauri) body,
+html:not(.platform-macos) body {
   background: var(--c-panel);
+}
+html:not(.platform-macos) {
+  --c-sidebar: var(--c-panel);
 }
 
 input,

@@ -4,7 +4,7 @@
 
 use std::io::Read;
 use std::net::TcpListener;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use bk_core::env::EnvMap;
@@ -42,7 +42,7 @@ impl Tunnels {
                 t.info.push(info);
                 continue;
             }
-            let spawned = Command::new(program)
+            let spawned = bk_core::proc::background(program)
                 .arg("-L")
                 .arg(f)
                 .args(servers::ssh_args(target, Purpose::Tunnel, paths))

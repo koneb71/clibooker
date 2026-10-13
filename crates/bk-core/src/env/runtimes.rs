@@ -124,6 +124,69 @@ fn var_dir(env: &EnvMap, key: &str) -> Option<PathBuf> {
     get(env, key).map(PathBuf::from)
 }
 
+/// `name` as an executable file name on this OS.
+fn exe(name: &str) -> String {
+    if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+}
+
+/// Where an install keeps `program`: `<home>/bin` normally, the install root itself for
+/// Windows layouts like nvm-windows, Volta or scoop (`<home>/node.exe`).
+pub fn tool_dir(home: &Path, program: &str) -> PathBuf {
+    let bin = home.join("bin");
+    if !bin.join(exe(program)).exists() && home.join(exe(program)).exists() { home.to_path_buf() } else { bin }
+}
+
+fn has_tool(home: &Path, program: &str) -> bool {
+    tool_dir(home, program).join(exe(program)).exists()
+}
+
+/// Windows folders that hold per-user and machine-wide installs.
+struct WinDirs {
+    program_files: Vec<PathBuf>,
+    appdata: Option<PathBuf>,
+    local_appdata: Option<PathBuf>,
+    scoop_apps: Vec<PathBuf>,
+}
+
+fn win_dirs(env: &EnvMap) -> WinDirs {
+    let mut program_files: Vec<PathBuf> =
+        ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"].iter().filter_map(|k| var_dir(env, k)).collect();
+    program_files.dedup();
+    let scoop = var_dir(env, "SCOOP").unwrap_or_else(|| home().join("scoop"));
+    let mut scoop_apps = vec![scoop.join("apps")];
+    if let Some(g) = var_dir(env, "SCOOP_GLOBAL").or_else(|| var_dir(env, "ProgramData").map(|p| p.join("scoop"))) {
+        scoop_apps.push(g.join("apps"));
+    }
+    WinDirs { program_files, appdata: var_dir(env, "APPDATA"), local_appdata: var_dir(env, "LOCALAPPDATA"), scoop_apps }
+}
+
+/// scoop installs: `<scoop>/apps/<app>/<version>` for apps whose name starts with a prefix.
+fn scoop(env: &EnvMap, app_prefixes: &[&str]) -> Vec<Install> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for apps in win_dirs(env).scoop_apps {
+        for (app, app_dir) in subdirs(&apps) {
+            if !app_prefixes.iter().any(|p| app.starts_with(p)) {
+                continue;
+            }
+            for (version, path) in subdirs(&app_dir) {
+                if version != "current" {
+                    out.push(Install { version, home: path, source: "scoop".into() });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// First line of a `VERSION` file (Go: `go1.22.3`).
+fn version_file(home: &Path) -> Option<String> {
+    let text = fs::read_to_string(home.join("VERSION")).ok()?;
+    first_line_of(&text).map(|l| l.trim_start_matches("go").to_string())
+}
+
 /// Subdirectories of `dir` as (name, path), skipping symlinked aliases.
 fn subdirs(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(rd) = fs::read_dir(dir) else { return Vec::new() };
@@ -139,15 +202,21 @@ fn subdirs(dir: &Path) -> Vec<(String, PathBuf)> {
 /// Version of a Homebrew formula from its `opt` symlink (`../Cellar/node/26.8.1`).
 fn homebrew(formula_prefix: &str, home_suffix: &str) -> Vec<Install> {
     let mut out = Vec::new();
-    for root in ["/opt/homebrew/opt", "/usr/local/opt"] {
-        let Ok(rd) = fs::read_dir(root) else { continue };
+    let roots = [
+        PathBuf::from("/opt/homebrew/opt"),
+        PathBuf::from("/usr/local/opt"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/opt"),
+        home().join(".linuxbrew/opt"),
+    ];
+    for root in roots {
+        let Ok(rd) = fs::read_dir(&root) else { continue };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             let is_formula = name == formula_prefix || name.starts_with(&format!("{formula_prefix}@"));
             if !is_formula {
                 continue;
             }
-            let target = fs::canonicalize(e.path()).unwrap_or(e.path());
+            let target = dunce::canonicalize(e.path()).unwrap_or(e.path());
             let version = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let home = target.join(home_suffix);
             if home.is_dir() && !parse_version(&version).is_empty() {
@@ -160,7 +229,13 @@ fn homebrew(formula_prefix: &str, home_suffix: &str) -> Vec<Install> {
 
 /// mise and asdf install trees: `<root>/installs/<tool>/<version>`.
 fn mise_asdf(env: &EnvMap, tools: &[&str]) -> Vec<Install> {
-    let mise = var_dir(env, "MISE_DATA_DIR").unwrap_or_else(|| home().join(".local/share/mise"));
+    let mise = var_dir(env, "MISE_DATA_DIR").unwrap_or_else(|| {
+        if cfg!(windows) {
+            var_dir(env, "LOCALAPPDATA").unwrap_or_else(|| home().join("AppData/Local")).join("mise")
+        } else {
+            var_dir(env, "XDG_DATA_HOME").unwrap_or_else(|| home().join(".local/share")).join("mise")
+        }
+    });
     let asdf = var_dir(env, "ASDF_DATA_DIR").unwrap_or_else(|| home().join(".asdf"));
     let mut out = Vec::new();
     for (root, source) in [(mise, "mise"), (asdf, "asdf")] {
@@ -182,11 +257,27 @@ fn node_installs(env: &EnvMap) -> Vec<Install> {
     for (name, path) in subdirs(&nvm.join("versions/node")) {
         out.push(Install { version: name.trim_start_matches('v').into(), home: path, source: "nvm".into() });
     }
+    let w = win_dirs(env);
+    if cfg!(windows) {
+        // nvm-windows: <NVM_HOME>/v20.11.1/node.exe
+        let nvm_home = var_dir(env, "NVM_HOME").or_else(|| w.appdata.as_ref().map(|a| a.join("nvm")));
+        for (name, path) in nvm_home.map(|h| subdirs(&h)).unwrap_or_default() {
+            if name.starts_with('v') && parse_version(&name).len() >= 2 {
+                out.push(Install {
+                    version: name.trim_start_matches('v').into(),
+                    home: path,
+                    source: "nvm-windows".into(),
+                });
+            }
+        }
+    }
     let fnm_roots = [
         var_dir(env, "FNM_DIR"),
         Some(home().join(".local/share/fnm")),
         Some(home().join("Library/Application Support/fnm")),
         Some(home().join(".fnm")),
+        w.appdata.as_ref().map(|a| a.join("fnm")),
+        w.local_appdata.as_ref().map(|a| a.join("fnm")),
     ];
     for root in fnm_roots.into_iter().flatten() {
         for (name, path) in subdirs(&root.join("node-versions")) {
@@ -197,13 +288,17 @@ fn node_installs(env: &EnvMap) -> Vec<Install> {
             });
         }
     }
-    let volta = var_dir(env, "VOLTA_HOME").unwrap_or_else(|| home().join(".volta"));
+    let volta = var_dir(env, "VOLTA_HOME").unwrap_or_else(|| match (&w.local_appdata, cfg!(windows)) {
+        (Some(l), true) => l.join("Volta"),
+        _ => home().join(".volta"),
+    });
     for (name, path) in subdirs(&volta.join("tools/image/node")) {
         out.push(Install { version: name, home: path, source: "volta".into() });
     }
     out.extend(mise_asdf(env, &["node", "nodejs"]));
     out.extend(homebrew("node", ""));
-    dedupe(out)
+    out.extend(scoop(env, &["nodejs"]));
+    dedupe(out.into_iter().filter(|i| has_tool(&i.home, "node")).collect())
 }
 
 fn java_release_version(home: &Path) -> Option<String> {
@@ -217,6 +312,25 @@ fn java_installs(env: &EnvMap) -> Vec<Install> {
         for (_, p) in subdirs(&root) {
             homes.push((p.join("Contents/Home"), "system".into()));
         }
+    }
+    // Linux distro JDKs (/usr/lib/jvm/java-21-openjdk-amd64) and Windows vendor installers.
+    let mut roots = vec![PathBuf::from("/usr/lib/jvm"), PathBuf::from("/usr/java")];
+    if cfg!(windows) {
+        for pf in win_dirs(env).program_files {
+            for vendor in ["Java", "Eclipse Adoptium", "Microsoft", "Zulu", "Amazon Corretto", "BellSoft", "Semeru"] {
+                roots.push(pf.join(vendor));
+            }
+        }
+    }
+    for root in roots {
+        for (_, p) in subdirs(&root) {
+            if !fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                homes.push((p, "system".into()));
+            }
+        }
+    }
+    for i in scoop(env, &["openjdk", "temurin", "zulu", "corretto", "microsoft"]) {
+        homes.push((i.home, i.source));
     }
     let sdkman = var_dir(env, "SDKMAN_DIR").unwrap_or_else(|| home().join(".sdkman"));
     for (name, p) in subdirs(&sdkman.join("candidates/java")) {
@@ -233,7 +347,7 @@ fn java_installs(env: &EnvMap) -> Vec<Install> {
     }
     let out = homes
         .into_iter()
-        .filter(|(h, _)| h.join("bin/java").exists())
+        .filter(|(h, _)| h.join("bin").join(exe("java")).exists())
         .filter_map(|(home, source)| {
             let version = java_release_version(&home)
                 .or_else(|| home.parent()?.parent()?.file_name().map(|n| n.to_string_lossy().into_owned()))?;
@@ -260,13 +374,46 @@ fn ruby_installs(env: &EnvMap) -> Vec<Install> {
     }
     out.extend(mise_asdf(env, &["ruby"]));
     out.extend(homebrew("ruby", ""));
-    dedupe(out.into_iter().filter(|i| i.home.join("bin/ruby").exists()).collect())
+    out.extend(scoop(env, &["ruby"]));
+    if cfg!(windows) {
+        // RubyInstaller: C:\Ruby33-x64
+        for (name, path) in subdirs(Path::new("C:\\")) {
+            if let Some(v) = name.strip_prefix("Ruby").and_then(|r| r.split('-').next())
+                && v.len() >= 2
+                && v.chars().all(|c| c.is_ascii_digit())
+            {
+                out.push(Install {
+                    version: format!("{}.{}", &v[..1], &v[1..]),
+                    home: path,
+                    source: "rubyinstaller".into(),
+                });
+            }
+        }
+    }
+    dedupe(out.into_iter().filter(|i| has_tool(&i.home, "ruby")).collect())
 }
 
 fn php_installs(env: &EnvMap) -> Vec<Install> {
     let mut out = homebrew("php", "");
     out.extend(mise_asdf(env, &["php"]));
-    dedupe(out.into_iter().filter(|i| i.home.join("bin/php").exists()).collect())
+    out.extend(scoop(env, &["php"]));
+    if cfg!(windows) {
+        // C:\php-8.3.4 or C:\tools\php83 (Chocolatey)
+        for root in [Path::new("C:\\"), Path::new("C:\\tools")] {
+            for (name, path) in subdirs(root) {
+                let lower = name.to_ascii_lowercase();
+                if let Some(rest) = lower.strip_prefix("php") {
+                    let v = rest.trim_start_matches(['-', '_']);
+                    let version =
+                        if v.contains('.') || v.len() < 2 { v.to_string() } else { format!("{}.{}", &v[..1], &v[1..]) };
+                    if !parse_version(&version).is_empty() {
+                        out.push(Install { version, home: path, source: "php".into() });
+                    }
+                }
+            }
+        }
+    }
+    dedupe(out.into_iter().filter(|i| has_tool(&i.home, "php")).collect())
 }
 
 fn go_installs(env: &EnvMap) -> Vec<Install> {
@@ -283,7 +430,19 @@ fn go_installs(env: &EnvMap) -> Vec<Install> {
     }
     out.extend(mise_asdf(env, &["go", "golang"]));
     out.extend(homebrew("go", "libexec"));
-    dedupe(out.into_iter().filter(|i| i.home.join("bin/go").exists()).collect())
+    out.extend(scoop(env, &["go"]));
+    // System installs: /usr/local/go, Debian's /usr/lib/go-1.22, C:\Program Files\Go.
+    let mut system = vec![PathBuf::from("/usr/local/go")];
+    system.extend(subdirs(Path::new("/usr/lib")).into_iter().filter(|(n, _)| n.starts_with("go-")).map(|(_, p)| p));
+    if cfg!(windows) {
+        system.extend(win_dirs(env).program_files.into_iter().map(|p| p.join("Go")));
+    }
+    for home in system {
+        if let Some(version) = version_file(&home) {
+            out.push(Install { version, home, source: "system".into() });
+        }
+    }
+    dedupe(out.into_iter().filter(|i| has_tool(&i.home, "go")).collect())
 }
 
 fn rust_toolchains(env: &EnvMap) -> Vec<Install> {
@@ -454,7 +613,7 @@ pub fn resolve(lang: &str, spec: &str, cwd: &Path, env: &EnvMap) -> Result<Optio
                     lang: lang.into(),
                     label: format!("go {}", i.version),
                     description: format!("go {} ({}{from_note})", i.version, i.source),
-                    bin_dirs: vec![i.home.join("bin")],
+                    bin_dirs: vec![tool_dir(&i.home, "go")],
                     vars: vec![("GOROOT".into(), i.home.display().to_string()), ("GOTOOLCHAIN".into(), "local".into())],
                 }));
             }
@@ -480,11 +639,16 @@ pub fn resolve(lang: &str, spec: &str, cwd: &Path, env: &EnvMap) -> Result<Optio
             let installs = installed(lang, env);
             let want =
                 parse_want(&wanted, lang).ok_or_else(|| anyhow::anyhow!("can't read {lang} version `{wanted}`"))?;
-            let hint = match lang {
-                "node" => format!("; install it with `nvm install {wanted}` or `fnm install {wanted}`"),
-                "java" => "; install a JDK (e.g. `brew install openjdk@NN` or SDKMAN)".into(),
-                "ruby" => format!("; install it with `rbenv install {wanted}`"),
-                _ => format!("; install it with `brew install php@{wanted}`"),
+            let hint = match (lang, std::env::consts::OS) {
+                ("node", _) => format!("; install it with `nvm install {wanted}` or `fnm install {wanted}`"),
+                ("java", "macos") => "; install a JDK (e.g. `brew install openjdk@NN` or SDKMAN)".into(),
+                ("java", "windows") => "; install a JDK (e.g. `winget install EclipseAdoptium.Temurin.21.JDK`)".into(),
+                ("java", _) => "; install a JDK (e.g. `sudo apt install openjdk-21-jdk` or SDKMAN)".into(),
+                ("ruby", "windows") => "; install it with RubyInstaller or `scoop install ruby`".into(),
+                ("ruby", _) => format!("; install it with `rbenv install {wanted}`"),
+                (_, "macos") => format!("; install it with `brew install php@{wanted}`"),
+                (_, "windows") => "; install it with `scoop install php`".into(),
+                _ => "; install it with your package manager".into(),
             };
             let Some(i) = pick(&installs, &want, lang) else { bail!(not_installed(lang, &wanted, &installs, &hint)) };
             let mut bin_dirs = Vec::new();
@@ -492,9 +656,9 @@ pub fn resolve(lang: &str, spec: &str, cwd: &Path, env: &EnvMap) -> Result<Optio
             match lang {
                 "node" => {
                     if let Some(p) = project_dir_with(cwd, "package.json") {
-                        bin_dirs.push(p.join("node_modules/.bin"));
+                        bin_dirs.push(p.join("node_modules").join(".bin"));
                     }
-                    bin_dirs.push(i.home.join("bin"));
+                    bin_dirs.push(tool_dir(&i.home, "node"));
                 }
                 "java" => {
                     bin_dirs.push(i.home.join("bin"));
@@ -502,12 +666,14 @@ pub fn resolve(lang: &str, spec: &str, cwd: &Path, env: &EnvMap) -> Result<Optio
                 }
                 "php" => {
                     if let Some(p) = project_dir_with(cwd, "composer.json") {
-                        bin_dirs.push(p.join("vendor/bin"));
+                        bin_dirs.push(p.join("vendor").join("bin"));
                     }
-                    bin_dirs.push(i.home.join("bin"));
-                    bin_dirs.push(i.home.join("sbin"));
+                    bin_dirs.push(tool_dir(&i.home, "php"));
+                    if !cfg!(windows) {
+                        bin_dirs.push(i.home.join("sbin"));
+                    }
                 }
-                _ => bin_dirs.push(i.home.join("bin")),
+                _ => bin_dirs.push(tool_dir(&i.home, lang)),
             }
             Ok(Some(Resolved {
                 lang: lang.into(),
@@ -604,12 +770,15 @@ mod tests {
         assert_eq!(resolve("java", "system", d.path(), &env).unwrap(), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn node_from_nvm_tree_with_node_modules_bin() {
         let d = tempfile::tempdir().unwrap();
         let nvm = d.path().join("nvm");
         for v in ["v18.17.1", "v22.14.0"] {
-            fs::create_dir_all(nvm.join("versions/node").join(v).join("bin")).unwrap();
+            let bin = nvm.join("versions/node").join(v).join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join("node"), "").unwrap();
         }
         let proj = d.path().join("app");
         fs::create_dir_all(proj.join(".git")).unwrap();

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::env::{EnvMap, detect, runtimes, venv};
+use crate::env::{EnvMap, conda, detect, runtimes, venv};
 use crate::model::EnvSpec;
 use crate::paths;
 use crate::store::Entry;
@@ -165,7 +165,84 @@ pub fn enter_script(entry: &Entry, default_cwd: &Path, base: &EnvMap) -> String 
     prelude(entry, default_cwd, base).join(" && ")
 }
 
-#[cfg(test)]
+/// Which shell language to render for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    Posix,
+    PowerShell,
+}
+
+impl Dialect {
+    /// What an interactive terminal on this OS speaks.
+    pub fn native() -> Self {
+        if cfg!(windows) { Dialect::PowerShell } else { Dialect::Posix }
+    }
+}
+
+/// `conda activate` needs conda's shell function, which non-interactive shells (and shells
+/// where `conda init` never ran) don't have: load it first when the bookmark uses conda.
+pub fn with_conda_hook(entry: &Entry, script: String, base: &EnvMap) -> String {
+    if !matches!(entry.bookmark.env, EnvSpec::Conda { .. }) {
+        return script;
+    }
+    let Some(conda_base) = conda::find_base(base) else { return script };
+    let sh = q_path(&conda_base.join("etc").join("profile.d").join("conda.sh"));
+    format!("case \"$(type conda 2>/dev/null)\" in *function*) ;; *) . {sh} ;; esac && {script}")
+}
+
+/// [`enter_script`] in either dialect, ready to `eval` / `Invoke-Expression`.
+pub fn enter_script_for(d: Dialect, entry: &Entry, default_cwd: &Path, base: &EnvMap) -> String {
+    match d {
+        Dialect::Posix => with_conda_hook(entry, enter_script(entry, default_cwd, base), base),
+        Dialect::PowerShell => crate::render_pwsh::enter_script(entry, default_cwd, base),
+    }
+}
+
+/// [`script`] in either dialect (a new terminal window's command).
+pub fn script_for(
+    d: Dialect,
+    entry: &Entry,
+    params: &BTreeMap<String, String>,
+    extra_args: &[String],
+    default_cwd: &Path,
+    base: &EnvMap,
+) -> Result<String> {
+    match d {
+        Dialect::Posix => Ok(with_conda_hook(entry, script(entry, params, extra_args, default_cwd, base)?, base)),
+        Dialect::PowerShell => crate::render_pwsh::script(entry, params, extra_args, default_cwd, base),
+    }
+}
+
+/// A program and its arguments as one quoted command line, e.g. an `ssh` invocation:
+/// `'ssh' '-e' 'none' …` or PowerShell's `& 'C:\…\ssh.exe' -e none …`.
+pub fn command_line(d: Dialect, program: &str, args: &[String]) -> String {
+    match d {
+        Dialect::Posix => {
+            std::iter::once(program).chain(args.iter().map(String::as_str)).map(q).collect::<Vec<_>>().join(" ")
+        }
+        Dialect::PowerShell => std::iter::once(format!("& {}", crate::shell::pwsh_string(program)))
+            .chain(args.iter().map(|a| crate::shell::pwsh_quote(a)))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// [`one_liner`] in either dialect (copy to clipboard).
+pub fn one_liner_for(
+    d: Dialect,
+    entry: &Entry,
+    params: &BTreeMap<String, String>,
+    extra_args: &[String],
+    default_cwd: &Path,
+    base: &EnvMap,
+) -> Result<String> {
+    match d {
+        Dialect::Posix => one_liner(entry, params, extra_args, default_cwd, base),
+        Dialect::PowerShell => crate::render_pwsh::one_liner(entry, params, extra_args, default_cwd, base),
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::model::{Bookmark, Step};

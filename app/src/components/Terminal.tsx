@@ -5,7 +5,8 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { type ITheme, Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef } from "react";
-import { api, inTauri } from "../lib/api";
+import { api, copyText, inTauri, readClipboard } from "../lib/api";
+import { isMac, isWindows } from "../lib/platform";
 import { useRuns } from "../stores/runs";
 import { type Resolved, useTheme } from "../stores/theme";
 
@@ -83,7 +84,8 @@ export function Terminal({ runId, visible, fontSize = 12.5 }: { runId: string; v
   useEffect(() => {
     const el = host.current!;
     const term = new XTerm({
-      fontFamily: '"SF Mono", ui-monospace, Menlo, Monaco, monospace',
+      fontFamily:
+        '"SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Mono", Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace',
       fontSize,
       lineHeight: 1.25,
       theme: themes[useTheme.getState().resolved],
@@ -91,7 +93,28 @@ export function Terminal({ runId, visible, fontSize = 12.5 }: { runId: string; v
       scrollback: 20000,
       macOptionIsMeta: true,
       allowProposedApi: true,
+      // Runs go through ConPTY on Windows; xterm adjusts its reflow and wrapping to match.
+      ...(isWindows ? { windowsPty: { backend: "conpty" as const } } : {}),
     });
+    // Off macOS, Ctrl+C/V belong to the program in the terminal; copy and paste are
+    // Ctrl+Shift+C / Ctrl+Shift+V, like other Linux and Windows terminals.
+    if (!isMac) {
+      term.attachCustomKeyEventHandler((e) => {
+        if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey) return true;
+        const k = e.key.toLowerCase();
+        if (k === "c" && term.hasSelection()) {
+          void copyText(term.getSelection());
+          return false;
+        }
+        if (k === "v") {
+          void readClipboard()
+            .then((t) => t && term.paste(t))
+            .catch(() => {});
+          return false;
+        }
+        return true;
+      });
+    }
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new SearchAddon());

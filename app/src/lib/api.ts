@@ -137,11 +137,28 @@ export const api = {
   setDockVisible: (visible: boolean) => call<void>("set_dock_visible", { visible }),
 };
 
+/** `~/x` → an absolute path the native dialogs understand. */
+export async function expandHome(p: string | undefined): Promise<string | undefined> {
+  if (!p || !inTauri || !(p === "~" || p.startsWith("~/") || p.startsWith("~\\"))) return p;
+  const { homeDir } = await import("@tauri-apps/api/path");
+  const home = (await homeDir()).replace(/[\\/]+$/, "");
+  const full = home + p.slice(1);
+  return home.includes("\\") ? full.replace(/\//g, "\\") : full;
+}
+
 export async function pickFolder(defaultPath?: string): Promise<string | null> {
   if (!inTauri) return window.prompt("Folder path", defaultPath ?? "~/") || null;
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const res = await open({ directory: true, multiple: false, defaultPath });
+  const res = await open({ directory: true, multiple: false, defaultPath: await expandHome(defaultPath) });
   return typeof res === "string" ? res : null;
+}
+
+export async function readClipboard(): Promise<string> {
+  if (inTauri) {
+    const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
+    return readText();
+  }
+  return navigator.clipboard.readText();
 }
 
 export async function copyText(text: string) {

@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.clibooker.app",
   "build": {
-    "beforeDevCommand": "sh scripts/prepare-sidecar.sh debug && pnpm dev",
+    "beforeDevCommand": "node scripts/prepare-sidecar.mjs debug && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "sh scripts/prepare-sidecar.sh release && pnpm build",
+    "beforeBuildCommand": "node scripts/prepare-sidecar.mjs release && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -17,20 +17,7 @@
         "width": 1180,
         "height": 760,
         "minWidth": 820,
-        "minHeight": 520,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": {
-          "x": 16,
-          "y": 20
-        },
-        "transparent": true,
-        "windowEffects": {
-          "effects": [
-            "sidebar"
-          ],
-          "state": "followsWindowActiveState"
-        }
+        "minHeight": 520
       },
       {
         "label": "palette",
@@ -39,21 +26,14 @@
         "width": 680,
         "height": 440,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "alwaysOnTop": true,
         "visibleOnAllWorkspaces": true,
         "skipTaskbar": true,
         "resizable": false,
         "visible": false,
         "center": true,
-        "shadow": true,
-        "windowEffects": {
-          "effects": [
-            "hudWindow"
-          ],
-          "state": "active",
-          "radius": 14
-        }
+        "shadow": true
       }
     ],
     "security": {
@@ -78,7 +58,20 @@
     },
     "externalBin": [
       "binaries/bk"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "section": "devel"
+      },
+      "rpm": {
+        "release": "1"
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   },
   "mainBinaryName": "Clibooker"
 }

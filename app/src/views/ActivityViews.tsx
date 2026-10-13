@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { api, copyText, on } from "../lib/api";
 import { useHistory, useLibrary } from "../lib/queries";
 import { requestRun } from "../lib/run";
+import { shellSetup } from "../lib/platform";
 import { cn, duration, relativeTime } from "../lib/utils";
 import { useUi } from "../stores/ui";
 import { EnvBadge, StatusDot, statusOfExit } from "../components/bits";
@@ -127,6 +128,8 @@ export function HistoryView() {
 export function InboxView() {
   const qc = useQueryClient();
   const { newBookmark } = useUi();
+  const { data: lib } = useLibrary();
+  const setup = shellSetup(lib?.shell ?? "zsh", true);
   const { data: items = [], isLoading } = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox(200) });
   useEffect(() => on("inbox-changed", () => qc.invalidateQueries({ queryKey: ["inbox"] })), [qc]);
 
@@ -154,11 +157,11 @@ export function InboxView() {
             <p className="mb-3 font-medium text-fg">Turn terminal commands into bookmarks in one click</p>
             <p className="mb-3">
               Enable recording in your shell and every command you run shows up here with its folder and active conda env / venv.
-              Add this line to <code className="font-mono text-fg">~/.zshrc</code>:
+              Add this line to <code className="font-mono text-fg">{setup.file}</code>:
             </p>
             <div className="mb-3 flex items-center gap-2 rounded-lg border border-line bg-panel px-3 py-2">
-              <code className="selectable flex-1 font-mono text-[12px] text-fg">eval "$(bk init zsh --record)"</code>
-              <IconButton label="Copy" onClick={() => void copyText('eval "$(bk init zsh --record)"').then(() => toast.success("Copied"))}>
+              <code className="selectable flex-1 font-mono text-[12px] text-fg">{setup.line}</code>
+              <IconButton label="Copy" onClick={() => void copyText(setup.line).then(() => toast.success("Copied"))}>
                 <Copy size={13} />
               </IconButton>
             </div>
