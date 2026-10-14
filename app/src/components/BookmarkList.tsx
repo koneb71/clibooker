@@ -1,7 +1,7 @@
-import { Globe, PackageOpen, Pin, Play, Plus, Search } from "lucide-react";
+import { Globe, MapPinOff, PackageOpen, Pin, Play, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 import { matchesSearch, sortEntries, useLibrary } from "../lib/queries";
-import { isMac, isMod, kbd } from "../lib/platform";
+import { computerNoun, isMac, isMod, kbd } from "../lib/platform";
 import { requestRun } from "../lib/run";
 import type { Entry } from "../lib/types";
 import { cn, relativeTime } from "../lib/utils";
@@ -189,8 +189,18 @@ export function BookmarkList() {
                     <Globe size={10} className="shrink-0" />
                     {e.bookmark.server}:{e.bookmark.cwd ?? "~"}
                   </span>
+                ) : e.folder?.state === "missing" ? (
+                  <span className="flex min-w-0 items-center gap-1 truncate text-warn" title={`${e.folder.path} isn't on this ${computerNoun}`}>
+                    <MapPinOff size={10} className="shrink-0" />
+                    Not on this {computerNoun}
+                  </span>
                 ) : (
-                  <span className="min-w-0 truncate">{e.cwd ?? "any folder"}</span>
+                  <span
+                    className="min-w-0 truncate"
+                    title={e.folder?.via ? `${e.bookmark.cwd} — ${e.folder.via.shared} is ${e.folder.via.local} on this ${computerNoun}` : undefined}
+                  >
+                    {e.cwd ?? "any folder"}
+                  </span>
                 )}
                 {e.last_run && <span className="ml-auto shrink-0">{relativeTime(e.last_run.started_ms)}</span>}
               </div>

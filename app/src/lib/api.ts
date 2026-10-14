@@ -1,6 +1,6 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Bookmark, CliStatus, DoctorReport, FolderScan, Inventory, Library, Preview, Reach, RecentCommand, RemoteFolder, RemoteInventory, RunInfo, RunRecord, ScriptScan, Server, ServerInfo, Settings, SyncContact, SyncResult, SyncStatus } from "./types";
+import type { Bookmark, CliStatus, DoctorReport, FolderRule, FolderScan, Inventory, Library, LocateResult, Preview, Reach, RecentCommand, RemoteFolder, RemoteInventory, RunInfo, RunRecord, ScriptScan, Server, ServerInfo, Settings, SyncContact, SyncResult, SyncStatus } from "./types";
 
 export const inTauri = isTauri();
 
@@ -113,6 +113,11 @@ export const api = {
     call<void>("sync_finish_setup", { token, bot, chatId: contact.chat_id, userId: contact.user_id, passphrase, device }),
   syncNow: () => call<SyncResult>("sync_now"),
   syncForget: () => call<void>("sync_forget"),
+  syncSetAuto: (on: boolean) => call<void>("sync_set_auto", { on }),
+  foldersList: () => call<FolderRule[]>("folders_list"),
+  foldersSet: (shared: string, local: string) => call<string | null>("folders_set", { shared, local }),
+  foldersRemove: (shared: string) => call<boolean>("folders_remove", { shared }),
+  locateFolder: (id: string, dir: string) => call<LocateResult>("locate_folder", { id, dir }),
   installCli: () => call<string>("install_cli"),
   runDoctor: () => call<DoctorReport>("run_doctor"),
   getInbox: (limit: number) => call<RecentCommand[]>("get_inbox", { limit }),

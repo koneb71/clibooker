@@ -14,10 +14,12 @@ export function prefillParams(entry: Entry): Record<string, string> {
 
 /**
  * Run a bookmark from the UI. Bookmarks with params or `confirm` go through the
- * run dialog first; given `params` (e.g. from the palette) skip it.
+ * run dialog first; given `params` (e.g. from the palette) skip it. So do bookmarks
+ * whose folder isn't on this device: the dialog asks where it is.
  */
 export function requestRun(entry: Entry, opts?: { params?: Record<string, string>; background?: boolean }) {
-  const needsPrompt = (entry.params.length > 0 && !opts?.params) || entry.bookmark.confirm || !entry.trusted;
+  const needsPrompt =
+    (entry.params.length > 0 && !opts?.params) || entry.bookmark.confirm || !entry.trusted || entry.folder?.state === "missing";
   if (needsPrompt) {
     useUi.getState().setRunPrompt({ entryId: entry.id, params: { ...prefillParams(entry), ...opts?.params } });
     return;

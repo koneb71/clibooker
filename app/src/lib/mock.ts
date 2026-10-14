@@ -3,7 +3,7 @@
 
 import { emitLocal, type OutputSink } from "./api";
 import { platform } from "./platform";
-import type { Bookmark, Entry, Library, Param, RunInfo, RunRecord, Settings, Step } from "./types";
+import type { Bookmark, Entry, FolderInfo, Library, Param, RunInfo, RunRecord, Settings, Step } from "./types";
 
 const GLOBAL = "~/.config/bk/bookmarks.toml";
 const PROJECT = "~/work/fastcap/.bk.toml";
@@ -70,16 +70,74 @@ const books: Record<string, { file: string; bookmark: Bookmark }> = {
     file: GLOBAL,
     bookmark: { command: "du -sh ~/work/* | sort -h | tail -20", tags: ["sys"] },
   },
+  // Synced from a device on another OS: its folder isn't here until it's located.
+  report: {
+    file: GLOBAL,
+    bookmark: {
+      description: "Weekly metrics report",
+      cwd: mockPlatform === "windows" ? "/Users/you/work/reports" : "D:\\work\\reports",
+      env: { type: "uv" },
+      command: "python make_report.py --week {{week:last}}",
+      tags: ["ml"],
+    },
+  },
+  // Found through a folder mapping on this device.
+  "api-tests": {
+    file: GLOBAL,
+    bookmark: { cwd: "/home/you/projects/api", env: { type: "venv", path: ".venv" }, command: "pytest -x tests" },
+  },
+  // A different command on Windows.
+  clean: {
+    file: GLOBAL,
+    bookmark: {
+      cwd: "~/work/fastcap",
+      command: "rm -rf build dist && pnpm build",
+      windows: { command: "Remove-Item -Recurse -Force build, dist; pnpm build" },
+    },
+  },
 };
+
+/** This device's folder mappings. */
+const rules: { shared: string; local: string }[] = [{ shared: "/home/you/projects", local: "~/work" }];
+
+const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+const isForeign = (p: string) => (mockPlatform === "windows" ? p.startsWith("/") : /^[A-Za-z]:[\\/]/.test(p));
+
+function folderOf(file: string, b: Bookmark): FolderInfo | null {
+  if (b.server) return null;
+  if (!b.cwd) return file === GLOBAL ? null : { state: "here", path: "~/work/fastcap", via: null, foreign: null, suggestion: null };
+  for (const r of rules) {
+    if (norm(b.cwd).startsWith(norm(r.shared) + "/")) {
+      return { state: "mapped", path: r.local + b.cwd.slice(r.shared.length).replace(/\\/g, "/"), via: r, foreign: null, suggestion: null };
+    }
+  }
+  if (isForeign(b.cwd)) {
+    const name = b.cwd.split(/[\\/]/).pop();
+    return { state: "missing", path: b.cwd, via: null, foreign: mockPlatform === "windows" ? "macOS" : "Windows", suggestion: `~/work/${name}` };
+  }
+  return { state: "here", path: b.cwd, via: null, foreign: null, suggestion: null };
+}
+
+/** What runs on this OS: its variant's command, else the bookmark's. */
+function stepsHere(b: Bookmark): Step[] {
+  const v = b[mockPlatform];
+  return v?.command ? [v.command] : v?.steps?.length ? v.steps : stepsOf(b);
+}
 
 const history: RunRecord[] = [
   rec("train", 0, now - 3600_000 * 5, 1_820_000),
   rec("dev", 1, now - 600_000, 4_000),
   rec("scrape-yelp", 0, now - 86400_000, 95_000),
+  { ...rec("train", 0, now - 3600_000 * 26, 2_400_000), id: "other", device: "desktop-pc" },
 ];
 let settings: Settings = { theme: "system", hotkey: "Alt+Space", terminal: "iterm" };
 const deletedServers = new Set<string>();
-let syncState: { device: string; bot: string; last_sync_ms: number | null; last_summary: string | null } | null = null;
+const thisDevice = mockPlatform === "windows" ? "desktop-pc" : "MacBook-Pro";
+// `?synced` starts the preview with sync set up.
+let syncState: { device: string; bot: string; last_sync_ms: number | null; last_summary: string | null; auto: boolean } | null =
+  typeof window !== "undefined" && new URLSearchParams(window.location.search).has("synced")
+    ? { device: thisDevice, bot: "clibooker_sync_bot", last_sync_ms: now - 120_000, last_summary: "↓ 2 updated from desktop-pc", auto: true }
+    : null;
 
 function rec(name: string, exit: number, started: number, dur: number): RunRecord {
   const b = books[name];
@@ -117,7 +175,8 @@ function paramsOf(b: Bookmark): Param[] {
 function library(): Library {
   const entries: Entry[] = Object.entries(books).map(([name, { file, bookmark }]) => {
     const id = `${file}#${name}`;
-    const first = stepsOf(bookmark);
+    const first = stepsHere(bookmark);
+    const folder = folderOf(file, bookmark);
     const firstText = first.length ? (typeof first[0] === "string" ? first[0] : first[0].run) : "";
     return {
       id,
@@ -125,7 +184,8 @@ function library(): Library {
       scope: file === GLOBAL ? "global" : "project",
       file,
       project_dir: file === GLOBAL ? null : "~/work/fastcap",
-      cwd: bookmark.cwd ?? (file === GLOBAL ? null : "~/work/fastcap"),
+      cwd: folder?.path ?? bookmark.cwd ?? null,
+      folder,
       bookmark,
       params: paramsOf(bookmark),
       summary: first.length > 1 ? `${firstText} (+${first.length - 1} more)` : firstText,
@@ -144,6 +204,8 @@ function library(): Library {
     default_hotkey: mockPlatform === "macos" ? "Alt+Space" : "Ctrl+Alt+Space",
     default_terminal: { macos: "terminal", windows: "windows-terminal", linux: "auto" }[mockPlatform],
     shell: { macos: "zsh", windows: "powershell", linux: "bash" }[mockPlatform],
+    default_step_shell: settings.shell ?? { macos: "zsh", windows: "pwsh", linux: "bash" }[mockPlatform],
+    device: syncState?.device ?? thisDevice,
     projects: [{ file: PROJECT, dir: "~/work/fastcap", name: "fastcap" }],
   };
 }
@@ -265,7 +327,7 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
       };
     case "scan_folder":
       return {
-        exists: true,
+        exists: !isForeign(String(args.path)) || rules.some((r) => norm(String(args.path)).startsWith(norm(r.shared))),
         detected: { type: "venv", path: ".venv" },
         venvs: [".venv"],
         has_uv_lock: false,
@@ -279,23 +341,39 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
       };
     case "preview_bookmark": {
       const b = args.bookmark as Bookmark;
-      const steps = stepsOf(b).map((s) => (typeof s === "string" ? s : s.run));
+      const steps = stepsHere(b).map((s) => (typeof s === "string" ? s : s.run));
+      const base = stepsOf(b).map((s) => (typeof s === "string" ? s : s.run));
+      const warnings: string[] = [];
+      const posixy = base.find((s) => /rm -rf|export \w+=/.test(s));
+      if (posixy && !b.windows?.command && !b.windows?.steps?.length && !b.shell) {
+        const here = mockPlatform === "windows";
+        warnings.push(
+          `\`${posixy}\` looks like POSIX shell (bash/zsh) syntax, but it runs in PowerShell ${here ? "here" : "on Windows"}; add a Windows command, or set shell = "bash" (Git Bash)`,
+        );
+      }
       const envLabel = b.env?.type === "conda" ? `conda:${b.env.name}` : (b.env?.type ?? "inherit");
+      const cwd = folderOf(GLOBAL, b)?.path ?? b.cwd ?? "~";
       return {
-        one_liner: `( cd ${b.cwd ?? "~"} && ${steps.join(" && ")} )`,
+        one_liner: `( cd ${cwd} && ${steps.join(" && ")} )`,
         plan: steps.length
           ? {
               name: args.name,
-              cwd: b.cwd ?? "~",
+              cwd,
               shell: "/bin/zsh",
               env_label: envLabel,
               env_description: b.env?.type === "conda" ? `conda env ${b.env.name} (/opt/miniconda3/envs/${b.env.name})` : "inherited environment",
               env_changes: b.env?.type === "conda" ? ["~PATH (+/opt/miniconda3/envs/x/bin)", "+CONDA_PREFIX"] : [],
-              steps: steps.map((s) => ({ label: s, command: s, cwd: b.cwd ?? "~", continue_on_error: false, synthetic: false })),
+              steps: steps.map((s) => ({ label: s, command: s, cwd, continue_on_error: false, synthetic: false })),
+              notes: [],
             }
           : null,
-        error: steps.length ? null : "bookmark has no `command` or `steps`",
+        error: !steps.length
+          ? "bookmark has no `command` or `steps`"
+          : b.cwd && isForeign(b.cwd) && !rules.some((r) => norm(b.cwd!).startsWith(norm(r.shared)))
+            ? `\`${args.name}\`'s folder ${b.cwd} is a ${mockPlatform === "windows" ? "macOS" : "Windows"} path, not on this device`
+            : null,
         params: paramsOf(b),
+        warnings,
       };
     }
     case "one_liner":
@@ -316,8 +394,17 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
           name,
           file,
           env: bookmark.env?.type ?? "inherit",
-          problems: name === "pdf-crawl" ? ["no virtualenv at ~/work/pdfcrawler/.venv (create it with `python -m venv .venv`)"] : [],
+          problems:
+            name === "pdf-crawl"
+              ? ["no virtualenv at ~/work/pdfcrawler/.venv (create it with `python -m venv .venv`)"]
+              : folderOf(file, bookmark)?.state === "missing"
+                ? [`folder ${bookmark.cwd} is a ${mockPlatform === "windows" ? "macOS" : "Windows"} path, not on this device`]
+                : [],
           warnings: [],
+          missing_folder:
+            folderOf(file, bookmark)?.state === "missing"
+              ? { written: bookmark.cwd!, foreign: folderOf(file, bookmark)!.foreign, suggestion: folderOf(file, bookmark)!.suggestion }
+              : undefined,
         })),
       };
     case "scan_scripts":
@@ -342,8 +429,55 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
         bot: syncState?.bot ?? null,
         last_sync_ms: syncState?.last_sync_ms ?? null,
         last_summary: syncState?.last_summary ?? null,
-        default_device: "MacBook-Pro",
+        default_device: thisDevice,
+        auto: syncState?.auto ?? true,
+        syncing: false,
+        pending: 0,
+        last_error: null,
+        devices: syncState
+          ? [
+              { name: syncState.device, os: { macos: "macOS", windows: "Windows", linux: "Linux" }[mockPlatform], last_change_ms: syncState.last_sync_ms ?? now, version: "0.3.0", this: true },
+              { name: mockPlatform === "windows" ? "MacBook-Pro" : "desktop-pc", os: mockPlatform === "windows" ? "macOS" : "Windows", last_change_ms: now - 3600_000 * 3, version: "0.3.0", this: false },
+              { name: "gpu-box", os: "Linux", last_change_ms: now - 86400_000 * 4, version: "0.2.0", this: false },
+            ]
+          : [],
       };
+    case "sync_set_auto":
+      if (syncState) syncState.auto = Boolean(args.on);
+      return null;
+    case "folders_list":
+      return rules.map((r) => ({
+        ...r,
+        local_exists: true,
+        used_by: Object.values(books).filter(({ file, bookmark }) => folderOf(file, bookmark)?.via?.shared === r.shared).length,
+      }));
+    case "folders_set": {
+      const i = rules.findIndex((r) => norm(r.shared) === norm(String(args.shared)));
+      const replaced = i >= 0 ? rules.splice(i, 1)[0].local : null;
+      rules.push({ shared: String(args.shared), local: String(args.local) });
+      setTimeout(() => emitLocal("library-changed", null), 0);
+      return replaced;
+    }
+    case "folders_remove": {
+      const i = rules.findIndex((r) => norm(r.shared) === norm(String(args.shared)));
+      if (i >= 0) rules.splice(i, 1);
+      setTimeout(() => emitLocal("library-changed", null), 0);
+      return i >= 0;
+    }
+    case "locate_folder": {
+      const name = String(args.id).split("#")[1];
+      const written = books[name].bookmark.cwd ?? "";
+      const missingBefore = Object.entries(books).filter(([n, { file, bookmark }]) => n !== name && folderOf(file, bookmark)?.state === "missing");
+      const parent = (p: string) => p.replace(/[\\/][^\\/]*$/, "");
+      rules.push({ shared: parent(written).replace(/\\/g, "/"), local: parent(String(args.dir)) });
+      setTimeout(() => emitLocal("library-changed", null), 0);
+      return {
+        shared: parent(written).replace(/\\/g, "/"),
+        local: parent(String(args.dir)),
+        replaced: null,
+        fixed: missingBefore.filter(([, { file, bookmark }]) => folderOf(file, bookmark)?.state !== "missing").map(([n]) => n),
+      };
+    }
     case "sync_check_token":
       if (!String(args.token).includes(":")) throw "Telegram doesn't accept this bot token (Unauthorized)";
       return "clibooker_sync_bot";
@@ -351,7 +485,7 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
       await new Promise((r) => setTimeout(r, 1500));
       return { chat_id: 42, user_id: 42, name: "You", has_data: false };
     case "sync_finish_setup":
-      syncState = { device: String(args.device), bot: String(args.bot), last_sync_ms: null, last_summary: null };
+      syncState = { device: String(args.device) || thisDevice, bot: String(args.bot), last_sync_ms: null, last_summary: null, auto: true };
       return null;
     case "sync_now":
       await new Promise((r) => setTimeout(r, 700));

@@ -84,6 +84,9 @@ export function useBackendInvalidation() {
       on("library-changed", () => {
         queryClient.invalidateQueries({ queryKey: keys.library });
         queryClient.invalidateQueries({ queryKey: ["servers"] });
+        // Folder mappings (folders.toml) change where folders are found.
+        queryClient.invalidateQueries({ queryKey: ["folders"] });
+        queryClient.invalidateQueries({ queryKey: ["scan"] });
       }),
       on("history-changed", () => {
         queryClient.invalidateQueries({ queryKey: ["history"] });

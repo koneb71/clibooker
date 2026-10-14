@@ -23,6 +23,16 @@ export interface StepTable {
 /** A plain string when only `run` is set. */
 export type Step = string | StepTable;
 
+export type Os = "macos" | "linux" | "windows";
+export const OSES: Os[] = ["macos", "linux", "windows"];
+
+/** What runs differently on one OS: the command (or steps) and the shell they're written for. */
+export interface OsVariant {
+  command?: string;
+  steps?: Step[];
+  shell?: string;
+}
+
 export type RuntimeLang = "node" | "java" | "ruby" | "go" | "rust" | "php";
 export const RUNTIME_LANGS: RuntimeLang[] = ["node", "java", "ruby", "go", "rust", "php"];
 
@@ -42,6 +52,10 @@ export interface Bookmark {
   detach?: boolean;
   command?: string;
   steps?: Step[];
+  /** A different command, steps or shell on one OS (`windows = { command = "…" }`). */
+  macos?: OsVariant;
+  linux?: OsVariant;
+  windows?: OsVariant;
   tags?: string[];
   dotenv?: string;
   vars?: Record<string, string>;
@@ -69,6 +83,8 @@ export interface RunRecord {
   commands: string[];
   exit_code: number | null;
   server?: string;
+  /** The device it ran on (absent in older records). */
+  device?: string;
 }
 
 export interface Entry {
@@ -78,12 +94,41 @@ export interface Entry {
   file: string;
   project_dir: string | null;
   cwd: string | null;
+  /** Where the folder is on this device; null for server bookmarks and ones without a folder. */
+  folder: FolderInfo | null;
   bookmark: Bookmark;
   params: Param[];
   summary: string;
   shadowed: boolean;
   trusted: boolean;
   last_run: RunRecord | null;
+}
+
+export interface FolderInfo {
+  /** As written (`here`), through a mapping on this device (`mapped`), or not here (`missing`). */
+  state: "here" | "mapped" | "missing";
+  /** On this device, with `~` (as written when missing). */
+  path: string;
+  via: { shared: string; local: string } | null;
+  /** The OS a missing folder's path was clearly written on. */
+  foreign: string | null;
+  /** A folder on this device that may be the missing one. */
+  suggestion: string | null;
+}
+
+export interface FolderRule {
+  shared: string;
+  local: string;
+  local_exists: boolean;
+  used_by: number;
+}
+
+export interface LocateResult {
+  shared: string;
+  local: string;
+  replaced: string | null;
+  /** Other bookmarks this found too. */
+  fixed: string[];
 }
 
 export interface Settings {
@@ -120,6 +165,10 @@ export interface Library {
   default_terminal: string;
   /** The user's shell for setup instructions: zsh, bash, powershell, ... */
   shell: string;
+  /** The shell steps run in when neither the bookmark nor settings pick one. */
+  default_step_shell: string;
+  /** This device's name (the one it syncs as). */
+  device: string;
 }
 
 export interface CondaEnv {
@@ -172,6 +221,7 @@ export interface PlanSummary {
   env_description: string;
   env_changes: string[];
   steps: PlannedStep[];
+  notes: string[];
 }
 
 export interface Preview {
@@ -179,6 +229,8 @@ export interface Preview {
   plan: PlanSummary | null;
   error: string | null;
   params: Param[];
+  /** Notes on what runs here, and steps written for another shell than the one that runs them. */
+  warnings: string[];
 }
 
 export type RunStatus = "running" | "succeeded" | "failed" | "stopped" | "disconnected" | "detached";
@@ -220,6 +272,8 @@ export interface DoctorCheck {
   env: string;
   problems: string[];
   warnings: string[];
+  /** The folder isn't on this device. */
+  missing_folder?: { written: string; foreign: string | null; suggestion: string | null };
 }
 
 export interface DoctorReport {
@@ -242,6 +296,35 @@ export interface SyncStatus {
   last_sync_ms: number | null;
   last_summary: string | null;
   default_device: string;
+  /** Syncs by itself. */
+  auto: boolean;
+  syncing: boolean;
+  /** Changes here not sent yet. */
+  pending: number;
+  /** Why automatic syncing is failing, if it is. */
+  last_error: string | null;
+  devices: SyncDevice[];
+}
+
+export interface SyncDevice {
+  name: string;
+  /** macOS, Linux, Windows */
+  os: string;
+  last_change_ms: number;
+  version: string;
+  this: boolean;
+}
+
+/** How a sync went (`sync-finished`). */
+export interface SyncEvent {
+  summary: string | null;
+  error: string | null;
+  /** Started by automatic syncing. */
+  auto: boolean;
+  /** Bookmarks, servers and settings changed here. */
+  received: number;
+  skipped: string[];
+  warning: string | null;
 }
 
 export interface SyncContact {

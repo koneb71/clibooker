@@ -13,7 +13,7 @@ import { api, on, pickFolder } from "./lib/api";
 import { isMac, isMod, kbd } from "./lib/platform";
 import { keys, useBackendInvalidation, useEntry, useLibrary } from "./lib/queries";
 import { requestRun } from "./lib/run";
-import type { RunInfo } from "./lib/types";
+import type { RunInfo, SyncEvent } from "./lib/types";
 import { useRuns } from "./stores/runs";
 import { useTheme } from "./stores/theme";
 import { useUi } from "./stores/ui";
@@ -100,9 +100,14 @@ export function MainApp() {
       on<string | null>("shell-env-ready", (err) => {
         if (err) toast.warning("Couldn't read your login shell environment", { description: err });
       }),
-      on<{ summary: string | null; error: string | null }>("sync-finished", ({ summary, error }) => {
-        if (error) toast.error("Sync failed", { description: error });
-        else toast.success(`Synced: ${summary}`);
+      on<SyncEvent>("sync-finished", (ev) => {
+        // Automatic syncs only speak up when something arrived; Settings shows why one failed.
+        const details = [...ev.skipped.map((x) => `Skipped ${x}`), ev.warning].filter(Boolean).join("\n") || undefined;
+        if (ev.error) {
+          if (!ev.auto) toast.error("Sync failed", { description: ev.error });
+        } else if (!ev.auto || ev.received > 0) {
+          toast.success(`Synced: ${ev.summary}`, { description: details });
+        }
         qc.invalidateQueries({ queryKey: ["sync-status"] });
         qc.invalidateQueries({ queryKey: ["servers"] });
       }),

@@ -1,12 +1,27 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Copy, ExternalLink, FolderGit2, Loader2, RefreshCw, Send, TerminalSquare, X } from "lucide-react";
+import {
+  ArrowRight,
+  CheckCircle2,
+  Copy,
+  ExternalLink,
+  FolderGit2,
+  FolderInput,
+  FolderOpen,
+  Laptop,
+  Loader2,
+  RefreshCw,
+  Send,
+  TerminalSquare,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { api, copyText, inTauri } from "../lib/api";
+import { api, copyText, inTauri, pickFolder } from "../lib/api";
 import { keys, useInventory, useLibrary } from "../lib/queries";
-import { isLinux, isMac, isWindows, kbd, shellSetup, trayName } from "../lib/platform";
+import { computerNoun, contractHome, isLinux, isMac, isWindows, kbd, platform, shellOptions, shellSetup, trayName } from "../lib/platform";
 import type { Settings, SyncContact } from "../lib/types";
-import { relativeTime } from "../lib/utils";
+import { cn, relativeTime } from "../lib/utils";
 import { useTheme } from "../stores/theme";
 import { Button, Field, IconButton, Input, Select, Switch } from "../components/ui";
 
@@ -39,26 +54,6 @@ function accelerator(e: React.KeyboardEvent): string | null {
 }
 
 const prettyHotkey = kbd;
-
-/** Step shells offered per platform ("" = the default). */
-function shellOptions(userShell: string): [string, string][] {
-  if (isWindows) {
-    return [
-      ["", "PowerShell (pwsh if installed)"],
-      ["pwsh", "PowerShell 7 (pwsh)"],
-      ["powershell", "Windows PowerShell 5.1"],
-      ["cmd", "Command Prompt (cmd)"],
-      ["bash", "Git Bash"],
-    ];
-  }
-  const fallback = userShell === "zsh" || userShell === "bash" ? userShell : "sh";
-  return [
-    ["", `Your login shell (${fallback})`],
-    ["zsh", "zsh"],
-    ["bash", "bash"],
-    ["sh", "sh"],
-  ];
-}
 
 const TERMINALS: [string, string][] = isMac
   ? [
@@ -207,7 +202,7 @@ export function SettingsView() {
               }
             >
               <Select className="w-[240px]" value={s.shell ?? ""} onChange={(e) => void save({ shell: e.target.value || undefined })}>
-                {shellOptions(lib.shell).map(([value, label]) => (
+                {shellOptions(platform, lib.shell).map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
                   </option>
@@ -350,6 +345,8 @@ export function SettingsView() {
 
           <SyncGroup />
 
+          <FoldersGroup />
+
           <Group title="Projects" description="Repos with a .bk.toml. Their bookmarks live in the repo and can be committed.">
             {lib.projects.length === 0 && <p className="text-xs text-faint">None yet. Use + next to Projects in the sidebar.</p>}
             {lib.projects.map((p) => (
@@ -438,6 +435,95 @@ export function SettingsView() {
   );
 }
 
+/**
+ * Settings → Folders on this device: where folders named by bookmarks from your other devices
+ * are on this one. Never synced; the bookmarks themselves aren't changed.
+ */
+function FoldersGroup() {
+  const { data: lib } = useLibrary();
+  const { data: rules, refetch } = useQuery({ queryKey: ["folders"], queryFn: api.foldersList });
+  const [shared, setShared] = useState("");
+  const [local, setLocal] = useState("");
+  const missing = lib?.entries.filter((e) => e.folder?.state === "missing").length ?? 0;
+  if (!lib || !rules) return null;
+
+  const add = async () => {
+    try {
+      const replaced = await api.foldersSet(shared.trim(), local.trim());
+      toast.success(`${shared.trim()} is ${local.trim()} on this ${computerNoun}`, { description: replaced ? `It was ${replaced}.` : undefined });
+      setShared("");
+      setLocal("");
+      await refetch();
+    } catch (e) {
+      toast.error("Couldn't add that", { description: String(e) });
+    }
+  };
+
+  return (
+    <Group
+      title="Folders on this device"
+      description={
+        <>
+          Bookmarks from your other devices name folders the way those devices do. Say where one is on this {computerNoun} and every
+          bookmark inside it follows. Kept on this {computerNoun} only; the bookmarks aren't changed.
+        </>
+      }
+    >
+      {missing > 0 && (
+        <p className="flex items-center gap-1.5 text-xs text-warn">
+          <TriangleAlert size={13} className="shrink-0" />
+          {missing} bookmark{missing === 1 ? "'s folder isn't" : "s' folders aren't"} on this {computerNoun} yet. Open one to locate it.
+        </p>
+      )}
+      {rules.length === 0 && !missing && (
+        <p className="text-xs text-faint">None needed: every bookmark's folder is where it says.</p>
+      )}
+      {rules.map((r) => (
+        <div key={r.shared} className="flex items-center gap-2 rounded-md border border-line px-3 py-2 text-xs">
+          <FolderInput size={14} className="shrink-0 text-muted" />
+          <span className="selectable truncate font-mono text-fg">{r.shared}</span>
+          <ArrowRight size={12} className="shrink-0 text-faint" />
+          <span className={cn("selectable min-w-0 flex-1 truncate font-mono", r.local_exists ? "text-fg" : "text-warn")}>
+            {r.local}
+            {!r.local_exists && " (not found)"}
+          </span>
+          <span className="shrink-0 text-faint">
+            {r.used_by} bookmark{r.used_by === 1 ? "" : "s"}
+          </span>
+          <IconButton
+            label="Forget this mapping"
+            onClick={async () => {
+              await api.foldersRemove(r.shared).catch((e) => toast.error(String(e)));
+              await refetch();
+            }}
+          >
+            <X size={13} />
+          </IconButton>
+        </div>
+      ))}
+      <div className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2">
+        <Input mono value={shared} onChange={(e) => setShared(e.target.value)} placeholder={isWindows ? "~/work" : "D:\\work"} aria-label="Folder as other devices name it" />
+        <ArrowRight size={12} className="text-faint" />
+        <div className="flex gap-1">
+          <Input mono value={local} onChange={(e) => setLocal(e.target.value)} placeholder={isWindows ? "D:\\work" : "~/work"} aria-label={`Where it is on this ${computerNoun}`} />
+          <IconButton
+            label="Choose a folder"
+            onClick={async () => {
+              const p = await pickFolder();
+              if (p) setLocal(contractHome(p, lib.home));
+            }}
+          >
+            <FolderOpen size={13} />
+          </IconButton>
+        </div>
+        <Button size="sm" disabled={!shared.trim() || !local.trim()} onClick={() => void add()}>
+          Add
+        </Button>
+      </div>
+    </Group>
+  );
+}
+
 function openLink(url: string) {
   if (inTauri) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url));
   else window.open(url, "_blank");
@@ -445,10 +531,11 @@ function openLink(url: string) {
 
 type SetupStep = { at: "token" } | { at: "start"; bot: string } | { at: "passphrase"; bot: string; contact: SyncContact };
 
-/** Settings → Sync: connect this device to the user's Telegram bot, then sync on demand. */
+/** Settings → Sync: connect this device to the user's Telegram bot; it then syncs by itself. */
 function SyncGroup() {
   const qc = useQueryClient();
-  const { data: st, refetch } = useQuery({ queryKey: ["sync-status"], queryFn: api.syncStatus });
+  // Automatic syncing changes this in the background.
+  const { data: st, refetch } = useQuery({ queryKey: ["sync-status"], queryFn: api.syncStatus, refetchInterval: 10_000 });
   const [step, setStep] = useState<SetupStep | null>(null);
   const [token, setToken] = useState("");
   const [pass, setPass] = useState("");
@@ -511,13 +598,56 @@ function SyncGroup() {
               <b>{st.device}</b> syncs with <code className="font-mono">@{st.bot}</code>
             </div>
             <div className="text-muted">
-              {st.last_sync_ms ? `Last synced ${relativeTime(st.last_sync_ms)} · ${st.last_summary ?? ""}` : "Not synced yet"}
+              {st.syncing
+                ? "Syncing…"
+                : st.last_sync_ms
+                  ? `Last synced ${relativeTime(st.last_sync_ms)} · ${st.last_summary ?? ""}`
+                  : "Not synced yet"}
             </div>
           </div>
           <Button size="sm" variant="primary" disabled={busy} onClick={() => void syncNow()}>
             {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Sync now
           </Button>
         </div>
+        {st.last_error && (
+          <p className="flex items-start gap-1.5 text-xs text-warn">
+            <TriangleAlert size={13} className="mt-px shrink-0" />
+            <span>
+              Can't sync right now ({st.last_error}). It tries again by itself{st.pending ? `; ${st.pending} change${st.pending === 1 ? " is" : "s are"} waiting` : ""}.
+            </span>
+          </p>
+        )}
+        <Switch
+          checked={st.auto}
+          onChange={async (on) => {
+            await api.syncSetAuto(on).catch((e) => toast.error(String(e)));
+            await refetch();
+          }}
+          label="Sync automatically"
+          hint={
+            st.auto
+              ? "Soon after you change something here, and when another device does (checked every couple of minutes, and when you come back to the app)."
+              : `Only when you press Sync now${st.pending ? ` (${st.pending} change${st.pending === 1 ? "" : "s"} not sent yet)` : ""}.`
+          }
+        />
+        {st.devices.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-muted">Devices</span>
+            <div className="overflow-hidden rounded-lg border border-line">
+              {st.devices.map((d) => (
+                <div key={d.name} className="flex items-center gap-2.5 border-b border-line px-3 py-2 text-xs last:border-b-0">
+                  <Laptop size={14} className="shrink-0 text-muted" />
+                  <span className="font-medium text-fg">{d.name}</span>
+                  <span className="text-faint">{d.os}</span>
+                  {d.this && <span className="rounded bg-accent-soft px-1.5 text-[10.5px] font-medium text-accent">this {computerNoun}</span>}
+                  <span className="ml-auto text-faint" title={d.version ? `Clibooker ${d.version}` : undefined}>
+                    last change {relativeTime(d.last_change_ms)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         <div>
           <Button
             variant="ghost"

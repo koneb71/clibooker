@@ -9,6 +9,7 @@ import type { PlanSummary } from "../lib/types";
 import { useRuns } from "../stores/runs";
 import { useUi } from "../stores/ui";
 import { CommandText, EnvBadge } from "./bits";
+import { FolderNotHere } from "./FolderStatus";
 import { Button, Dialog, Field, Input } from "./ui";
 
 /** Collects params (and confirmation) before starting a run. */
@@ -93,6 +94,7 @@ export function RunDialog() {
             </p>
           </div>
         )}
+        <FolderNotHere entry={entry} />
         {entry.params.length > 0 && (
           <div className="grid grid-cols-2 gap-3">
             {entry.params.map((p, i) => (
@@ -110,7 +112,9 @@ export function RunDialog() {
         )}
 
         <div className="max-h-[220px] overflow-y-auto rounded-lg border border-line bg-panel p-3 text-xs">
-          {error ? (
+          {entry.folder?.state === "missing" ? (
+            <p className="text-faint">Shows what runs once its folder is found here.</p>
+          ) : error ? (
             <p className="selectable text-err">{error}</p>
           ) : plan ? (
             <div className="flex flex-col gap-1.5">

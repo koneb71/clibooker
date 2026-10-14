@@ -11,21 +11,34 @@ import {
   SquareTerminal,
   Trash2,
   TriangleAlert,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api, copyText, pickFolder } from "../lib/api";
-import { contractHome, isAbsolutePath, isMod, kbd, trayName } from "../lib/platform";
+import {
+  contractHome,
+  isAbsolutePath,
+  isMod,
+  kbd,
+  notificationName,
+  osLabel,
+  platform,
+  shellOptions,
+  thisComputer,
+  trayName,
+} from "../lib/platform";
 import { allTags, keys, useFolderScan, useInventory, useLibrary, useRemoteFolder, useServerInventory, useServers } from "../lib/queries";
 import { folderFromRemote, inventoryFromRemote } from "../lib/remote";
 import { useRuns } from "../stores/runs";
 import { prefillParams, requestRun } from "../lib/run";
-import type { Bookmark, EnvSpec, Entry, Library, Preview } from "../lib/types";
+import { OSES, type Bookmark, type EnvSpec, type Entry, type Library, type Os, type OsVariant, type Preview, type StepTable } from "../lib/types";
 import { cn, compactStep, nameError, stepsOf } from "../lib/utils";
 import { useUi } from "../stores/ui";
 import { CommandText } from "./bits";
 import { KeyValueEditor, newKey, StepsEditor, TagInput, type StepDraft, type VarDraft } from "./editors";
 import { EnvPicker } from "./EnvPicker";
+import { FolderNotHere, FolderVia } from "./FolderStatus";
 import { RuntimesEditor } from "./RuntimesEditor";
 import { Badge, Button, Dialog, Field, IconButton, Input, Kbd, Select, Switch, Textarea } from "./ui";
 
@@ -38,7 +51,7 @@ interface Draft {
   env: EnvSpec;
   runtimes: NonNullable<Bookmark["runtimes"]>;
   path: string[];
-  /** "" = this Mac. */
+  /** "" = this device. */
   server: string;
   forward: string[];
   detach: boolean;
@@ -52,7 +65,54 @@ interface Draft {
   confirm: boolean;
   notify: boolean;
   pinned: boolean;
+  /** What runs instead on one OS. */
+  variants: Partial<Record<Os, VariantDraft>>;
+  /** Fields this version doesn't know (from a newer Clibooker), kept as they are. */
+  unknown: Record<string, unknown>;
 }
+
+/** A per-OS command; an empty command means the same one as on every other system. */
+interface VariantDraft {
+  mode: "command" | "steps";
+  command: string;
+  steps: StepDraft[];
+  shell: string;
+}
+
+const KNOWN_FIELDS = new Set([
+  "description", "cwd", "env", "runtimes", "path", "server", "forward", "detach", "command", "steps",
+  "macos", "linux", "windows", "tags", "dotenv", "vars", "shell", "confirm", "notify", "pinned",
+]);
+
+/** Shells that only exist on one OS: picking one here only changes this OS's shell. */
+const OS_ONLY_SHELLS = ["pwsh", "powershell", "cmd"];
+
+const stepDraft = (s: StepTable): StepDraft => ({
+  key: newKey(),
+  run: s.run,
+  name: s.name ?? "",
+  cwd: s.cwd ?? "",
+  continue_on_error: !!s.continue_on_error,
+});
+
+const toSteps = (steps: StepDraft[]) =>
+  steps.map((s) => compactStep({ run: s.run, name: s.name, cwd: s.cwd, continue_on_error: s.continue_on_error }));
+
+function variantFrom(v: OsVariant | undefined): VariantDraft | undefined {
+  if (!v) return undefined;
+  const steps = v.steps?.length ? stepsOf({ steps: v.steps }) : [];
+  return { mode: steps.length ? "steps" : "command", command: v.command ?? "", steps: steps.map(stepDraft), shell: v.shell ?? "" };
+}
+
+function variantTo(v: VariantDraft): OsVariant | undefined {
+  const out: OsVariant = {};
+  if (v.mode === "command" && v.command.trim()) out.command = v.command;
+  if (v.mode === "steps" && v.steps.some((s) => s.run.trim())) out.steps = toSteps(v.steps);
+  if (v.shell) out.shell = v.shell;
+  return Object.keys(out).length ? out : undefined;
+}
+
+const hasOwnCommand = (v: VariantDraft | undefined) => !!v && (v.mode === "command" ? !!v.command.trim() : v.steps.length > 0);
 
 function fromEntry(e: Entry, lib: Library): Draft {
   const b = e.bookmark;
@@ -71,7 +131,7 @@ function fromEntry(e: Entry, lib: Library): Draft {
     detach: !!b.detach,
     mode: multi ? "steps" : "command",
     command: b.command ?? (multi ? "" : (steps[0]?.run ?? "")),
-    steps: steps.map((s) => ({ key: newKey(), run: s.run, name: s.name ?? "", cwd: s.cwd ?? "", continue_on_error: !!s.continue_on_error })),
+    steps: steps.map(stepDraft),
     tags: b.tags ?? [],
     dotenv: b.dotenv ?? "",
     vars: Object.entries(b.vars ?? {}).map(([k, v]) => ({ key: newKey(), k, v })),
@@ -79,6 +139,8 @@ function fromEntry(e: Entry, lib: Library): Draft {
     confirm: !!b.confirm,
     notify: !!b.notify,
     pinned: !!b.pinned,
+    variants: Object.fromEntries(OSES.flatMap((os) => (b[os] ? [[os, variantFrom(b[os])]] : []))),
+    unknown: Object.fromEntries(Object.entries(b).filter(([k]) => !KNOWN_FIELDS.has(k))),
   };
 }
 
@@ -104,11 +166,13 @@ function emptyDraft(file: string | null, seed?: { command?: string; cwd?: string
     confirm: false,
     notify: false,
     pinned: false,
+    variants: {},
+    unknown: {},
   };
 }
 
 function toBookmark(d: Draft): Bookmark {
-  const b: Bookmark = {};
+  const b: Bookmark = { ...d.unknown };
   if (d.description.trim()) b.description = d.description.trim();
   if (d.cwd.trim()) b.cwd = d.cwd.trim();
   if (d.env.type !== "inherit") b.env = d.env;
@@ -121,10 +185,12 @@ function toBookmark(d: Draft): Bookmark {
     if (d.detach) b.detach = true;
   }
   if (d.mode === "command") b.command = d.command;
-  else
-    b.steps = d.steps.map((s) =>
-      compactStep({ run: s.run, name: s.name, cwd: s.cwd, continue_on_error: s.continue_on_error }),
-    );
+  else b.steps = toSteps(d.steps);
+  // Server bookmarks run in the server's shell, whatever the OS here.
+  for (const os of d.server.trim() ? [] : OSES) {
+    const v = d.variants[os] && variantTo(d.variants[os]);
+    if (v) b[os] = v;
+  }
   if (d.tags.length) b.tags = d.tags;
   if (d.dotenv.trim()) b.dotenv = d.dotenv.trim();
   const vars = Object.fromEntries(d.vars.filter((v) => v.k).map((v) => [v.k, v.v]));
@@ -186,9 +252,14 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
+  /** The OS the command field shows ("all" = every system without its own). */
+  const [osTab, setOsTab] = useState<Os | "all">("all");
   const nameRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => setDraft(initial), [initial]);
+  useEffect(() => {
+    setDraft(initial);
+    setOsTab("all");
+  }, [initial]);
 
   const dirty = useMemo(
     () => !!draft && !!initial && JSON.stringify({ ...toBookmark(draft), n: draft.name, f: draft.file }) !== JSON.stringify({ ...toBookmark(initial), n: initial.name, f: initial.file }),
@@ -221,7 +292,7 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
     api
       .preview(debounced.file, debounced.name, toBookmark(debounced), {})
       .then((p) => alive && setPreview(p))
-      .catch((e) => alive && setPreview({ one_liner: null, plan: null, error: String(e), params: [] }));
+      .catch((e) => alive && setPreview({ one_liner: null, plan: null, error: String(e), params: [], warnings: [] }));
     return () => {
       alive = false;
     };
@@ -393,11 +464,12 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
               value={draft.server}
               onChange={(e) => {
                 const server = e.target.value;
-                // Local folders and envs don't carry over to a server (and vice versa).
-                setDraft({ ...draft, server, cwd: server === draft.server ? draft.cwd : server ? "~" : "", env: { type: "inherit" }, runtimes: {}, forward: [], detach: false });
+                // Local folders, envs and per-OS commands don't carry over to a server (and vice versa).
+                setDraft({ ...draft, server, cwd: server === draft.server ? draft.cwd : server ? "~" : "", env: { type: "inherit" }, runtimes: {}, forward: [], detach: false, variants: server ? {} : draft.variants });
+                if (server) setOsTab("all");
               }}
             >
-              <option value="">This Mac</option>
+              <option value="">{thisComputer}</option>
               {servers?.map((s) => (
                 <option key={s.name} value={s.name}>
                   {s.name} — {s.destination}
@@ -442,10 +514,19 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
                 <FolderOpen size={13} /> Choose…
               </Button>
             </div>
-            {scan && !scan.exists && draft.cwd && (
-              <span className="flex items-center gap-1 text-xs text-warn">
-                <TriangleAlert size={12} /> Folder not found
-              </span>
+            {entry?.folder && draft.cwd === (entry.bookmark.cwd ?? "") ? (
+              <>
+                <FolderNotHere entry={entry} />
+                <FolderVia entry={entry} />
+              </>
+            ) : (
+              scan &&
+              !scan.exists &&
+              draft.cwd && (
+                <span className="flex items-center gap-1 text-xs text-warn">
+                  <TriangleAlert size={12} /> Folder not found
+                </span>
+              )
             )}
             {scan && scan.script_count > 0 && isNew && (
               <button
@@ -500,60 +581,11 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
             </>
           )}
 
-          <Field
-            label={draft.mode === "command" ? "Command" : "Steps"}
-            aside={
-              <div className="flex rounded-md bg-hover p-0.5 text-xs">
-                {(["command", "steps"] as const).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => {
-                      if (m === draft.mode) return;
-                      if (m === "steps") {
-                        setDraft({
-                          ...draft,
-                          mode: m,
-                          steps: draft.steps.length
-                            ? draft.steps
-                            : [{ key: newKey(), run: draft.command, name: "", cwd: "", continue_on_error: false }],
-                        });
-                      } else {
-                        setDraft({ ...draft, mode: m, command: draft.command || draft.steps[0]?.run || "" });
-                      }
-                    }}
-                    className={cn(
-                      "rounded px-2 py-0.5 font-medium transition-colors",
-                      draft.mode === m ? "bg-raised text-fg shadow-sm" : "text-muted hover:text-fg",
-                    )}
-                  >
-                    {m === "command" ? "Single command" : "Workflow"}
-                  </button>
-                ))}
-              </div>
-            }
-            hint={
-              <>
-                Use <code className="font-mono text-muted">{"{{name}}"}</code> or{" "}
-                <code className="font-mono text-muted">{"{{name:default}}"}</code> for values you fill in at run time.
-              </>
-            }
-          >
-            {draft.mode === "command" ? (
-              <Textarea
-                mono
-                rows={Math.min(10, Math.max(3, draft.command.split("\n").length + 1))}
-                value={draft.command}
-                onChange={(e) => set("command", e.target.value)}
-                placeholder="python train.py --epochs {{epochs:10}}"
-              />
-            ) : (
-              <StepsEditor steps={draft.steps} onChange={(s) => set("steps", s)} />
-            )}
-          </Field>
+          <CommandField draft={draft} setDraft={setDraft} tab={osTab} setTab={setOsTab} userShell={lib.shell} />
 
           {preview && <PreviewCard preview={preview} />}
 
-          <Section title="Options" defaultOpen={!!(draft.tags.length || draft.dotenv || draft.vars.length || draft.path.length || draft.shell || draft.confirm || draft.notify)}>
+          <Section title="Options" defaultOpen={!!(draft.tags.length || draft.dotenv || draft.vars.length || draft.path.length || stepShell(draft) || draft.confirm || draft.notify)}>
             <Field label="Tags">
               <TagInput tags={draft.tags} onChange={(t) => set("tags", t)} suggestions={allTags(lib)} />
             </Field>
@@ -564,13 +596,16 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
                   {scan?.dotenv_files.map((f) => <option key={f} value={f} />)}
                 </datalist>
               </Field>
-              <Field label="Shell">
-                <Select value={draft.shell} onChange={(e) => set("shell", e.target.value)}>
-                  <option value="">Default ({lib.settings.shell ?? "zsh"})</option>
-                  <option value="zsh">zsh</option>
-                  <option value="bash">bash</option>
-                  <option value="sh">sh</option>
-                  <option value="fish">fish</option>
+              <Field label="Shell" hint={draft.variants[platform]?.shell ? `Only on ${osLabel[platform]}` : undefined}>
+                <Select value={stepShell(draft)} onChange={(e) => setDraft(withShellHere(draft, e.target.value))}>
+                  {shellOptions(platform, lib.shell, { fish: platform !== "windows" }).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {value ? label : `Default (${lib.default_step_shell})`}
+                    </option>
+                  ))}
+                  {stepShell(draft) && !shellOptions(platform, lib.shell, { fish: true }).some(([v]) => v === stepShell(draft)) && (
+                    <option value={stepShell(draft)}>{stepShell(draft)}</option>
+                  )}
                 </Select>
               </Field>
             </div>
@@ -582,7 +617,7 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
             </Field>
             <div className="flex flex-col gap-1">
               <Switch checked={draft.confirm} onChange={(v) => set("confirm", v)} label="Ask before running" hint="Shows what will run and waits for confirmation" />
-              <Switch checked={draft.notify} onChange={(v) => set("notify", v)} label="Notify when finished" hint="macOS notification, even when the window is focused" />
+              <Switch checked={draft.notify} onChange={(v) => set("notify", v)} label="Notify when finished" hint={`${notificationName}, even when the window is focused`} />
             </div>
           </Section>
         </div>
@@ -632,6 +667,171 @@ export function BookmarkEditor({ entry }: { entry: Entry | null }) {
   );
 }
 
+/** The shell steps run in on this device: this OS's own, else the bookmark's. */
+function stepShell(d: Draft): string {
+  return d.variants[platform]?.shell || d.shell;
+}
+
+/**
+ * Pick the shell for this device. A shell only this OS has (PowerShell, cmd), or one for a
+ * command only this OS runs, is kept for this OS, so the bookmark keeps working elsewhere.
+ */
+function withShellHere(d: Draft, shell: string): Draft {
+  const here = d.variants[platform];
+  if (hasOwnCommand(here) || OS_ONLY_SHELLS.includes(shell)) {
+    const v = here ?? { mode: "command", command: "", steps: [], shell: "" };
+    return { ...d, variants: { ...d.variants, [platform]: { ...v, shell } } };
+  }
+  const variants = { ...d.variants };
+  if (here) variants[platform] = { ...here, shell: "" };
+  const left = variants[platform];
+  if (left && !variantTo(left)) delete variants[platform];
+  return { ...d, shell, variants };
+}
+
+/** The command (or workflow) for every system, and what runs instead on one OS. */
+function CommandField({
+  draft,
+  setDraft,
+  tab,
+  setTab,
+  userShell,
+}: {
+  draft: Draft;
+  setDraft: (d: Draft) => void;
+  tab: Os | "all";
+  setTab: (t: Os | "all") => void;
+  userShell: string;
+}) {
+  const remote = !!draft.server;
+  const variant = tab === "all" ? undefined : draft.variants[tab];
+  const cur: VariantDraft = variant ?? { mode: draft.mode, command: draft.command, steps: draft.steps, shell: draft.shell };
+  const update = (patch: Partial<VariantDraft>) => {
+    if (tab === "all") setDraft({ ...draft, ...patch });
+    else setDraft({ ...draft, variants: { ...draft.variants, [tab]: { ...cur, ...patch } } });
+  };
+  const withVariants = OSES.filter((os) => draft.variants[os]);
+  const without = OSES.filter((os) => !draft.variants[os]);
+
+  const addVariant = (os: Os) => {
+    // Start from what runs everywhere: usually a small edit away.
+    const v: VariantDraft = { mode: draft.mode, command: draft.command, steps: draft.steps.map((s) => ({ ...s, key: newKey() })), shell: "" };
+    setDraft({ ...draft, variants: { ...draft.variants, [os]: v } });
+    setTab(os);
+  };
+  const removeVariant = (os: Os) => {
+    const variants = { ...draft.variants };
+    delete variants[os];
+    setDraft({ ...draft, variants });
+    setTab("all");
+  };
+  const setMode = (m: VariantDraft["mode"]) => {
+    if (m === cur.mode) return;
+    if (m === "steps") {
+      update({ mode: m, steps: cur.steps.length ? cur.steps : [{ key: newKey(), run: cur.command, name: "", cwd: "", continue_on_error: false }] });
+    } else {
+      update({ mode: m, command: cur.command || cur.steps[0]?.run || "" });
+    }
+  };
+
+  const others = withVariants.map((os) => osLabel[os]).join(" and ");
+  const hint = variant ? (
+    <>On {osLabel[tab as Os]}, this runs instead{hasOwnCommand(variant) ? "" : " (empty: the same command as everywhere, in this shell)"}.</>
+  ) : withVariants.length ? (
+    <>Runs everywhere except {others}, which {withVariants.length === 1 ? "has its own" : "have their own"}.</>
+  ) : (
+    <>
+      Use <code className="font-mono text-muted">{"{{name}}"}</code> or <code className="font-mono text-muted">{"{{name:default}}"}</code> for values
+      you fill in at run time.
+    </>
+  );
+
+  return (
+    <Field
+      label={cur.mode === "command" ? "Command" : "Steps"}
+      aside={
+        <div className="flex rounded-md bg-hover p-0.5 text-xs">
+          {(["command", "steps"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={cn("rounded px-2 py-0.5 font-medium transition-colors", cur.mode === m ? "bg-raised text-fg shadow-sm" : "text-muted hover:text-fg")}
+            >
+              {m === "command" ? "Single command" : "Workflow"}
+            </button>
+          ))}
+        </div>
+      }
+      hint={hint}
+    >
+      {!remote && (
+        <div className="flex flex-wrap items-center gap-1 text-xs">
+          {withVariants.length > 0 &&
+            (["all", ...withVariants] as const).map((t) => (
+              <span
+                key={t}
+                className={cn(
+                  "flex items-center rounded-md transition-colors",
+                  tab === t ? "bg-accent-soft text-accent" : "text-muted hover:bg-hover hover:text-fg",
+                )}
+              >
+                <button onClick={() => setTab(t)} className="flex items-center gap-1.5 px-2 py-0.5 font-medium">
+                  {t === "all" ? "All systems" : osLabel[t]}
+                  {t === platform && <span title={`${thisComputer} runs this`} className="size-1.5 rounded-full bg-current opacity-70" />}
+                </button>
+                {t !== "all" && (
+                  <button aria-label={`Remove the ${osLabel[t]} command`} onClick={() => removeVariant(t)} className="pr-1.5 opacity-60 hover:opacity-100">
+                    <X size={11} />
+                  </button>
+                )}
+              </span>
+            ))}
+          {without.length > 0 && (
+            <select
+              value=""
+              aria-label="Use a different command on one OS"
+              onChange={(e) => addVariant(e.target.value as Os)}
+              className="cursor-pointer rounded-md bg-transparent px-1.5 py-0.5 text-xs text-faint outline-none hover:bg-hover hover:text-fg"
+            >
+              <option value="" disabled>
+                {withVariants.length ? "+ Another OS" : "Different on Windows, macOS or Linux?"}
+              </option>
+              {without.map((os) => (
+                <option key={os} value={os}>
+                  A {osLabel[os]} command
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+      {cur.mode === "command" ? (
+        <Textarea
+          mono
+          rows={Math.min(10, Math.max(3, cur.command.split("\n").length + 1))}
+          value={cur.command}
+          onChange={(e) => update({ command: e.target.value })}
+          placeholder={variant ? draft.command || "Same as all systems" : "python train.py --epochs {{epochs:10}}"}
+        />
+      ) : (
+        <StepsEditor steps={cur.steps} onChange={(s) => update({ steps: s })} />
+      )}
+      {variant && tab !== "all" && (
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-faint">Shell on {osLabel[tab]}</span>
+          <Select className="w-[230px]" value={variant.shell} onChange={(e) => update({ shell: e.target.value })}>
+            {shellOptions(tab, tab === platform ? userShell : "", { fish: tab !== "windows" }).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </Select>
+        </div>
+      )}
+    </Field>
+  );
+}
+
 function PreviewCard({ preview }: { preview: Preview }) {
   const plan = preview.plan;
   return (
@@ -644,27 +844,37 @@ function PreviewCard({ preview }: { preview: Preview }) {
       ) : plan ? (
         <div className="flex flex-col gap-1.5">
           <div className="flex items-baseline gap-2">
-            <span className="w-12 shrink-0 text-faint">runs in</span>
+            <span className="w-14 shrink-0 text-faint">runs in</span>
             <span className="selectable font-mono text-[11.5px] text-fg">{plan.cwd}</span>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="w-12 shrink-0 text-faint">env</span>
+            <span className="w-14 shrink-0 text-faint">env</span>
             <span className="text-fg">{plan.env_description}</span>
           </div>
           {plan.env_changes.length > 0 && (
             <div className="flex items-baseline gap-2">
-              <span className="w-12 shrink-0 text-faint">vars</span>
+              <span className="w-14 shrink-0 text-faint">vars</span>
               <span className="selectable font-mono text-[11px] break-all text-muted">{plan.env_changes.join("  ")}</span>
             </div>
           )}
           {plan.steps.map((s, i) => (
             <div key={i} className="flex items-baseline gap-2">
-              <span className="w-12 shrink-0 text-faint">{plan.steps.length > 1 ? `step ${i + 1}` : "command"}</span>
+              <span className="w-14 shrink-0 text-faint">{plan.steps.length > 1 ? `step ${i + 1}` : "command"}</span>
               <CommandText text={s.command} className="selectable text-[11.5px] break-all whitespace-pre-wrap text-fg" />
             </div>
           ))}
         </div>
       ) : null}
+      {preview.warnings.length > 0 && (
+        <div className="mt-2 flex flex-col gap-1 border-t border-line pt-2">
+          {preview.warnings.map((w) => (
+            <div key={w} className="flex items-start gap-1.5 text-warn">
+              <TriangleAlert size={12} className="mt-0.5 shrink-0" />
+              <span className="leading-relaxed">{w}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {preview.params.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line pt-2">
           <span className="text-faint">asks for</span>

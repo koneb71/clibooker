@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookmarkPlus, CheckCircle2, Copy, RefreshCw, RotateCcw, Trash2, TriangleAlert } from "lucide-react";
+import { BookmarkPlus, CheckCircle2, Copy, Laptop, RefreshCw, RotateCcw, Trash2, TriangleAlert } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { api, copyText, on } from "../lib/api";
@@ -9,6 +9,7 @@ import { shellSetup } from "../lib/platform";
 import { cn, duration, relativeTime } from "../lib/utils";
 import { useUi } from "../stores/ui";
 import { EnvBadge, StatusDot, statusOfExit } from "../components/bits";
+import { FolderNotHere } from "../components/FolderStatus";
 import { Button, IconButton, Kbd } from "../components/ui";
 
 function ViewShell({ title, subtitle, actions, children }: { title: string; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode }) {
@@ -40,6 +41,8 @@ export function HistoryView() {
   const { data: lib } = useLibrary();
   const [filter, setFilter] = useState<"all" | "failed">("all");
   const rows = records.filter((r) => filter === "all" || (r.exit_code !== 0 && r.exit_code !== null));
+  // Runs sync between devices; older records don't say where they ran.
+  const devices = new Set(records.map((r) => r.device ?? lib?.device)).size;
 
   const groups = useMemo(() => {
     const out: { day: string; items: typeof rows }[] = [];
@@ -55,7 +58,7 @@ export function HistoryView() {
   return (
     <ViewShell
       title="History"
-      subtitle={`${records.length} runs from the app and the bk CLI`}
+      subtitle={`${records.length} runs from the app and the bk CLI${devices > 1 ? `, on ${devices} devices` : ""}`}
       actions={
         <div className="flex rounded-md bg-hover p-0.5 text-xs">
           {(["all", "failed"] as const).map((f) => (
@@ -93,6 +96,11 @@ export function HistoryView() {
                         <span className="font-mono text-[11px] text-faint">{r.env}</span>
                         {r.server && <span className="rounded bg-hover px-1 text-[10.5px] text-muted">@{r.server}</span>}
                         {r.source === "cli" && <span className="rounded bg-hover px-1 text-[10.5px] text-muted">cli</span>}
+                        {r.device && r.device !== lib?.device && (
+                          <span title={`Ran on ${r.device}`} className="flex items-center gap-1 rounded bg-hover px-1 text-[10.5px] text-muted">
+                            <Laptop size={10} /> {r.device}
+                          </span>
+                        )}
                       </div>
                       <span className="selectable truncate font-mono text-[11.5px] text-muted">{r.commands.join(" && ")}</span>
                       {params.length > 0 && (
@@ -200,6 +208,7 @@ export function InboxView() {
 
 export function DoctorView() {
   const { select } = useUi();
+  const { data: lib } = useLibrary();
   const { data, isFetching, refetch } = useQuery({ queryKey: ["doctor"], queryFn: api.runDoctor });
   const failing = data?.checks.filter((c) => c.problems.length) ?? [];
   const warned = data?.checks.filter((c) => !c.problems.length && c.warnings.length) ?? [];
@@ -227,25 +236,38 @@ export function DoctorView() {
             {e}
           </div>
         ))}
-        {[...failing, ...warned].map((c) => (
-          <button
-            key={c.entry_id}
-            onClick={() => select(c.entry_id)}
-            className="flex flex-col gap-1.5 rounded-lg border border-line px-4 py-3 text-left hover:bg-hover"
-          >
-            <div className="flex items-center gap-2">
-              <TriangleAlert size={14} className={c.problems.length ? "text-err" : "text-warn"} />
-              <span className="text-[13px] font-semibold">{c.name}</span>
-              <span className="font-mono text-[11px] text-faint">{c.env}</span>
-              <span className="ml-auto text-[11px] text-faint">Open <Kbd>↩</Kbd></span>
+        {[...failing, ...warned].map((c) => {
+          const entry = c.missing_folder ? lib?.entries.find((e) => e.id === c.entry_id) : undefined;
+          // The folder box says it, with a way to fix it.
+          const problems = entry?.folder?.state === "missing" ? c.problems.filter((p) => !p.startsWith("folder ")) : c.problems;
+          return (
+            <div
+              key={c.entry_id}
+              role="button"
+              tabIndex={0}
+              onClick={() => select(c.entry_id)}
+              onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && select(c.entry_id)}
+              className="flex cursor-default flex-col gap-1.5 rounded-lg border border-line px-4 py-3 text-left hover:bg-hover"
+            >
+              <div className="flex items-center gap-2">
+                <TriangleAlert size={14} className={c.problems.length ? "text-err" : "text-warn"} />
+                <span className="text-[13px] font-semibold">{c.name}</span>
+                <span className="font-mono text-[11px] text-faint">{c.env}</span>
+                <span className="ml-auto text-[11px] text-faint">Open <Kbd>↩</Kbd></span>
+              </div>
+              {[...problems.map((p) => [p, "text-err"]), ...c.warnings.map((w) => [w, "text-warn"])].map(([msg, cls]) => (
+                <p key={msg} className={cn("pl-6 text-xs leading-relaxed", cls)}>
+                  {msg}
+                </p>
+              ))}
+              {entry && (
+                <div className="ml-6" onClick={(e) => e.stopPropagation()}>
+                  <FolderNotHere entry={entry} onLocated={() => void refetch()} />
+                </div>
+              )}
             </div>
-            {[...c.problems.map((p) => [p, "text-err"]), ...c.warnings.map((w) => [w, "text-warn"])].map(([msg, cls]) => (
-              <p key={msg} className={cn("pl-6 text-xs leading-relaxed", cls)}>
-                {msg}
-              </p>
-            ))}
-          </button>
-        ))}
+          );
+        })}
         {data && healthy > 0 && <p className="text-center text-xs text-faint">{healthy} healthy bookmarks not shown</p>}
       </div>
     </ViewShell>

@@ -48,6 +48,39 @@ export function kbd(spec: string): string {
 /** Where the window menu lives: the macOS menu bar, the system tray elsewhere. */
 export const trayName = isMac ? "menu bar" : "system tray";
 
+export const osLabel: Record<Platform, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
+
+/** This computer, as its OS calls it: "this Mac", "this PC", "this computer". */
+export const computerNoun = isMac ? "Mac" : isWindows ? "PC" : "computer";
+export const thisComputer = `This ${computerNoun}`;
+
+/** What a "run finished" notification is called here. */
+export const notificationName = isMac ? "A macOS notification" : isWindows ? "A Windows notification" : "A desktop notification";
+
+/**
+ * Step shells offered on an OS ("" = its default). `userShell` names this device's login
+ * shell, for the default's label.
+ */
+export function shellOptions(os: Platform, userShell = "", { fish = false } = {}): [string, string][] {
+  if (os === "windows") {
+    return [
+      ["", "PowerShell (pwsh if installed)"],
+      ["pwsh", "PowerShell 7 (pwsh)"],
+      ["powershell", "Windows PowerShell 5.1"],
+      ["cmd", "Command Prompt (cmd)"],
+      ["bash", "Git Bash"],
+    ];
+  }
+  const login = userShell === "zsh" || userShell === "bash" ? userShell : "sh";
+  return [
+    ["", os === platform ? `Your login shell (${login})` : "The login shell (zsh, bash or sh)"],
+    ["zsh", "zsh"],
+    ["bash", "bash"],
+    ["sh", "sh"],
+    ...(fish ? [["fish", "fish"] as [string, string]] : []),
+  ];
+}
+
 export type ShellKind = "zsh" | "bash" | "powershell";
 
 /** The rc file and the line that loads bk's shell integration. */
