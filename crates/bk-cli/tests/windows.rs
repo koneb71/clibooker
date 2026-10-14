@@ -79,8 +79,16 @@ fn venv_scripts_folder_and_go_for_powershell() {
     let v = s.path().join(".venv");
     std::fs::create_dir_all(v.join("Scripts")).unwrap();
     std::fs::write(v.join("pyvenv.cfg"), "home = C:\\Python\n").unwrap();
-    s.add(&["py", "Write-Output \"$env:VIRTUAL_ENV|$(($env:PATH -split ';')[0])\"", "--cwd", ".", "--env", "venv"]);
-    s.bk().arg("py").assert().success().stdout(contains(".venv|").and(contains("Scripts")));
+    // pwsh puts its own folder first on PATH when it starts, so look for the venv's anywhere.
+    s.add(&[
+        "py",
+        "Write-Output \"$env:VIRTUAL_ENV|$(@($env:PATH -split ';' | Where-Object { $_ -like '*.venv\\Scripts' })[0])\"",
+        "--cwd",
+        ".",
+        "--env",
+        "venv",
+    ]);
+    s.bk().arg("py").assert().success().stdout(contains(".venv|").and(contains(".venv\\Scripts")));
     s.bk()
         .args(["go", "--print", "--shell", "powershell", "py"])
         .assert()

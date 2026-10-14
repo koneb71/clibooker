@@ -79,6 +79,7 @@ const history: RunRecord[] = [
 ];
 let settings: Settings = { theme: "system", hotkey: "Alt+Space", terminal: "iterm" };
 const deletedServers = new Set<string>();
+let syncState: { device: string; bot: string; last_sync_ms: number | null; last_summary: string | null } | null = null;
 
 function rec(name: string, exit: number, started: number, dur: number): RunRecord {
   const b = books[name];
@@ -334,6 +335,31 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
           { source: "Makefile", name: "deploy", command: "make deploy", detail: "Ship to staging", suggested_name: "deploy", runtime: null },
         ],
       };
+    case "sync_status":
+      return {
+        configured: !!syncState,
+        device: syncState?.device ?? null,
+        bot: syncState?.bot ?? null,
+        last_sync_ms: syncState?.last_sync_ms ?? null,
+        last_summary: syncState?.last_summary ?? null,
+        default_device: "MacBook-Pro",
+      };
+    case "sync_check_token":
+      if (!String(args.token).includes(":")) throw "Telegram doesn't accept this bot token (Unauthorized)";
+      return "clibooker_sync_bot";
+    case "sync_wait_for_start":
+      await new Promise((r) => setTimeout(r, 1500));
+      return { chat_id: 42, user_id: 42, name: "You", has_data: false };
+    case "sync_finish_setup":
+      syncState = { device: String(args.device), bot: String(args.bot), last_sync_ms: null, last_summary: null };
+      return null;
+    case "sync_now":
+      await new Promise((r) => setTimeout(r, 700));
+      if (syncState) Object.assign(syncState, { last_sync_ms: Date.now(), last_summary: "↑ 12 sent · history +40" });
+      return { line: "↑ 12 sent · history +40", skipped: [], warning: null };
+    case "sync_forget":
+      syncState = null;
+      return null;
     case "delete_server":
       deletedServers.add(String(args.name));
       return null;

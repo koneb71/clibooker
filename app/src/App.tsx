@@ -100,6 +100,12 @@ export function MainApp() {
       on<string | null>("shell-env-ready", (err) => {
         if (err) toast.warning("Couldn't read your login shell environment", { description: err });
       }),
+      on<{ summary: string | null; error: string | null }>("sync-finished", ({ summary, error }) => {
+        if (error) toast.error("Sync failed", { description: error });
+        else toast.success(`Synced: ${summary}`);
+        qc.invalidateQueries({ queryKey: ["sync-status"] });
+        qc.invalidateQueries({ queryKey: ["servers"] });
+      }),
     ];
     return () => offs.forEach((off) => off());
   }, [qc]);

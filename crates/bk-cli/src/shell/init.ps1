@@ -92,7 +92,7 @@ if (-not (Get-Variable -Name __BkLoaded -Scope Global -ErrorAction SilentlyConti
     $words = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
     $index = if ($wordToComplete) { $words.Count - 1 } else { $words.Count }
     $subs = 'add', 'save', 'run', 'ls', 'show', 'edit', 'rm', 'mv', 'go', 'history', 'doctor', 'trust',
-      'export', 'import', 'init', 'app', 'scan', 'server', 'servers', 'ssh'
+      'export', 'import', 'init', 'app', 'scan', 'server', 'servers', 'ssh', 'sync'
     $candidates = @()
     if ($index -eq 1) {
       $candidates = @(bk ls --names 2>$null) + $subs

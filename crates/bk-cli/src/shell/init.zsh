@@ -85,7 +85,7 @@ if [[ -z ${__BK_ZSH_LOADED-} ]]; then
       'ls:list bookmarks' 'show:show details' 'edit:edit in $EDITOR' 'rm:delete' 'mv:rename'
       'go:enter its folder and env' 'history:past runs' 'doctor:check bookmarks' 'trust:approve a project .bk.toml'
       'export:export bookmarks' 'import:import bookmarks' 'init:print shell integration' 'app:open the desktop app'
-      'scan:bookmark a project'"'"'s scripts' 'server:manage SSH servers' 'servers:list SSH servers' 'ssh:connect to a server'
+      'scan:bookmark a project'"'"'s scripts' 'server:manage SSH servers' 'servers:list SSH servers' 'ssh:connect to a server' 'sync:sync with your other devices'
     )
     if (( CURRENT == 2 )); then
       names=(${(f)"$(command bk ls --names 2>/dev/null)"})

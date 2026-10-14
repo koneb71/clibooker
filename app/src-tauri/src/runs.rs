@@ -1119,18 +1119,6 @@ mod ssh_e2e {
             Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(d.join(k)).status().unwrap();
         }
         std::fs::copy(d.join("client.pub"), d.join("authorized_keys")).unwrap();
-        let port = free_port();
-        std::fs::write(
-            d.join("sshd_config"),
-            format!(
-                "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nAuthorizedKeysFile {d}/authorized_keys\n\
-                 PidFile {d}/pid\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
-                 AllowTcpForwarding yes\nPermitTTY yes\nLogLevel ERROR\n\
-                 SetEnv PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n",
-                d = d.display()
-            ),
-        )
-        .unwrap();
         std::fs::write(
             d.join("ssh"),
             format!(
@@ -1140,20 +1128,43 @@ mod ssh_e2e {
         )
         .unwrap();
         Command::new("chmod").arg("+x").arg(d.join("ssh")).status().unwrap();
-        let child = Command::new("/usr/sbin/sshd")
-            .args(["-D", "-e", "-f"])
-            .arg(d.join("sshd_config"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let start = Instant::now();
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            if start.elapsed() > Duration::from_secs(5) {
-                return None;
+        // Parallel tests can be handed the same free port; if another test's sshd got it, ours
+        // exits at once while the port still answers. Check ours is alive, else try another port.
+        let mut started = None;
+        for _ in 0..5 {
+            let port = free_port();
+            std::fs::write(
+                d.join("sshd_config"),
+                format!(
+                    "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nAuthorizedKeysFile {d}/authorized_keys\n\
+                     PidFile {d}/pid\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
+                     AllowTcpForwarding yes\nPermitTTY yes\nLogLevel ERROR\n\
+                     SetEnv PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n",
+                    d = d.display()
+                ),
+            )
+            .unwrap();
+            let mut child = Command::new("/usr/sbin/sshd")
+                .args(["-D", "-e", "-f"])
+                .arg(d.join("sshd_config"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?;
+            let start = Instant::now();
+            while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() && start.elapsed() < Duration::from_secs(5)
+            {
+                std::thread::sleep(Duration::from_millis(50));
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(150));
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() && matches!(child.try_wait(), Ok(None)) {
+                started = Some((port, child));
+                break;
+            }
+            let _ = child.kill();
+            let _ = child.wait();
         }
+        let (port, child) = started?;
         Some(Sshd { dir, port, child })
     }
 

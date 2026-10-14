@@ -114,6 +114,11 @@ pub enum Cmd {
         #[arg(last = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
+    /// Sync bookmarks, servers, settings and history between your devices (through your Telegram bot)
+    Sync {
+        #[command(subcommand)]
+        cmd: Option<SyncCmd>,
+    },
     /// Open the Clibooker desktop app
     App,
     /// Run a steps file for the desktop app (internal)
@@ -242,6 +247,32 @@ pub enum OnConflict {
     Skip,
     Overwrite,
     Rename,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SyncCmd {
+    /// Connect this device to your Telegram bot
+    Setup(SyncSetupArgs),
+    /// This device's sync settings and the latest synced snapshot
+    Status,
+    /// Stop syncing on this device (keeps the chat in Telegram)
+    Forget,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncSetupArgs {
+    /// Bot token from @BotFather (asked for if left out); the passphrase can come from BK_SYNC_PASSPHRASE
+    #[arg(long)]
+    pub token: Option<String>,
+    /// Name shown for this device [default: hostname]
+    #[arg(long)]
+    pub device: Option<String>,
+    /// Set up again even if this device already syncs
+    #[arg(long)]
+    pub force: bool,
+    /// Sync right away without asking
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

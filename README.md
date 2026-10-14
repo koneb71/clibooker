@@ -112,6 +112,7 @@ Add `--record` (e.g. `eval "$(bk init zsh --record)"`) to also feed the app's In
 | `bk trust [DIR]` | Approve a project's `.bk.toml` (`--revoke` to withdraw) |
 | `bk export [NAMES] [-o FILE] [--json]` · `bk import FILE [--on-conflict skip\|overwrite\|rename]` | Move bookmarks between machines |
 | `bk app` | Open the desktop app |
+| `bk sync` | Sync with your other devices · `bk sync setup` · `bk sync status` · `bk sync forget` |
 | `bk ssh SERVER [-- cmd]` | Interactive SSH session (or run one command) |
 | `bk server add NAME user@host [-p PORT] [-i KEY] [-J JUMP] [-L 8888:127.0.0.1:8888] [-o K=V]` | Save a server · `bk server rm NAME` · `bk server unhide NAME` · `bk server scan NAME` |
 | `bk servers [--check]` | List servers (yours and `~/.ssh/config`) with connection status |
@@ -236,6 +237,23 @@ Safety:
 - Forwards can only bind to loopback.
 - Hosts and users are validated.
 - Project `.bk.toml` files can reference servers but not define them, and they still need `bk trust`.
+
+## Sync between devices
+
+Keep bookmarks, servers, settings and run history the same on all your machines through a Telegram bot that only you use. There's no server to run, and everything is end-to-end encrypted with your passphrase before it leaves a device.
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token.
+2. Run `bk sync setup` (or **Settings → Sync → Set up sync** in the app): paste the token, press **Start** in your bot's chat, and choose a passphrase.
+3. On each other device, run setup with the same token and passphrase.
+
+Then sync with `bk sync`, the **Sync now** button, or the tray menu. Syncing only happens when you ask. `bk sync status` shows the latest sync, and `bk sync forget` stops syncing on one device.
+
+How it works:
+- **One snapshot:** your bot's chat holds a single pinned, encrypted snapshot (Argon2id + XChaCha20-Poly1305). Each sync downloads it, merges, and uploads a new one if this device had changes.
+- **Merging:** each bookmark, server and setting is merged on its own, and the most recent change wins, deletions included. Run history from all devices is combined.
+- **Settings:** shell, pop-out terminal, ssh program and hotkey are kept separately per OS, so a Windows setting never lands on a Mac. Theme and the rest are shared.
+- **Not synced:** project `.bk.toml` files (they live in their repos), trust approvals, the Inbox, and launch-at-login.
+- **The bot token and derived key** stay in this device's data folder (`sync/config.json`, readable only by you). The passphrase is never stored, and it can't be recovered.
 
 ## Platforms
 

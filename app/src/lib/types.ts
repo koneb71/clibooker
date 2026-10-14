@@ -235,6 +235,29 @@ export interface RecentCommand {
   command: string;
 }
 
+export interface SyncStatus {
+  configured: boolean;
+  device: string | null;
+  bot: string | null;
+  last_sync_ms: number | null;
+  last_summary: string | null;
+  default_device: string;
+}
+
+export interface SyncContact {
+  chat_id: number;
+  user_id: number;
+  name: string;
+  /** The chat already holds synced data, so the passphrase must match it. */
+  has_data: boolean;
+}
+
+export interface SyncResult {
+  line: string;
+  skipped: string[];
+  warning: string | null;
+}
+
 export interface CliStatus {
   on_path: string | null;
   bundled: string | null;

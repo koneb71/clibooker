@@ -39,6 +39,7 @@ pub const RESERVED_NAMES: &[&str] = &[
     "settings",
     "show",
     "ssh",
+    "sync",
     "trust",
 ];
 

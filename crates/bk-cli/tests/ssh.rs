@@ -44,33 +44,47 @@ fn start_sshd() -> Option<Sshd> {
     keygen(&d.join("hostkey"));
     keygen(&d.join("client"));
     std::fs::copy(d.join("client.pub"), d.join("authorized_keys")).unwrap();
-    let port = free_port();
-    std::fs::write(
-        d.join("sshd_config"),
-        format!(
-            "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nAuthorizedKeysFile {d}/authorized_keys\n\
-             PidFile {d}/sshd.pid\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
-             PubkeyAuthentication yes\nAllowTcpForwarding yes\nPermitTTY yes\nLogLevel ERROR\n\
-             SetEnv PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n",
-            d = d.display()
-        ),
-    )
-    .unwrap();
-    let child = Command::new("/usr/sbin/sshd")
-        .args(["-D", "-e", "-f"])
-        .arg(d.join("sshd_config"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let start = Instant::now();
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        if start.elapsed() > Duration::from_secs(5) {
-            eprintln!("skipping: sshd did not start");
+    // Parallel tests can be handed the same free port; if another test's sshd got it, ours
+    // exits at once while the port still answers. Check ours is alive, else try another port.
+    let mut started = None;
+    for _ in 0..5 {
+        let port = free_port();
+        std::fs::write(
+            d.join("sshd_config"),
+            format!(
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nAuthorizedKeysFile {d}/authorized_keys\n\
+                 PidFile {d}/sshd.pid\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
+                 PubkeyAuthentication yes\nAllowTcpForwarding yes\nPermitTTY yes\nLogLevel ERROR\n\
+                 SetEnv PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n",
+                d = d.display()
+            ),
+        )
+        .unwrap();
+        let Ok(mut child) = Command::new("/usr/sbin/sshd")
+            .args(["-D", "-e", "-f"])
+            .arg(d.join("sshd_config"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
             return None;
+        };
+        let start = Instant::now();
+        while TcpStream::connect(("127.0.0.1", port)).is_err() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(150));
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() && matches!(child.try_wait(), Ok(None)) {
+            started = Some((port, child));
+            break;
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
+    let Some((port, child)) = started else {
+        eprintln!("skipping: sshd did not start");
+        return None;
+    };
     // ssh wrapper: a private known_hosts so tests never touch ~/.ssh/known_hosts.
     let wrapper = d.join("ssh-wrapper");
     std::fs::write(

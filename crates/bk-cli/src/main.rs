@@ -4,6 +4,7 @@ mod exec;
 mod manage;
 mod remote_cmds;
 mod shellcmds;
+mod sync_cmds;
 
 use std::process::ExitCode;
 
@@ -54,6 +55,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<i32> {
         Some(Cmd::Scan(a)) => manage::scan(&ctx, a),
         Some(Cmd::Server { cmd, check }) => remote_cmds::server(&ctx, cmd, check),
         Some(Cmd::Ssh { server, command }) => remote_cmds::ssh(&ctx, &server, &command),
+        Some(Cmd::Sync { cmd }) => sync_cmds::sync(&ctx, cmd),
         Some(Cmd::Init { .. } | Cmd::App | Cmd::RunSteps { .. }) => unreachable!("handled above"),
         Some(Cmd::External(args)) => {
             // `bk train k=v -- extra` → `bk run train k=v -- extra`

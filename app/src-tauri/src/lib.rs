@@ -7,6 +7,7 @@ mod palette;
 mod runs;
 mod servers_cmds;
 mod state;
+mod sync_cmds;
 mod tray;
 mod tunnels;
 mod watcher;
@@ -178,6 +179,12 @@ pub fn run() {
             servers_cmds::connect_server,
             servers_cmds::shell_here,
             servers_cmds::scan_remote_folder,
+            sync_cmds::sync_status,
+            sync_cmds::sync_check_token,
+            sync_cmds::sync_wait_for_start,
+            sync_cmds::sync_finish_setup,
+            sync_cmds::sync_now,
+            sync_cmds::sync_forget,
             external_term::open_in_terminal,
             palette::set_hotkey,
             palette::hotkey_error,

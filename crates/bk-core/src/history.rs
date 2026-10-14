@@ -100,13 +100,16 @@ pub fn read(path: &Path, limit: usize, name: Option<&str>) -> Result<Vec<RunReco
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
-    Ok(text
+    // Newest first by start time (synced runs from other devices are appended out of order).
+    let mut records: Vec<RunRecord> = text
         .lines()
         .rev()
         .filter_map(|l| serde_json::from_str::<RunRecord>(l).ok())
         .filter(|r| name.is_none_or(|n| r.name == n))
-        .take(limit)
-        .collect())
+        .collect();
+    records.sort_by_key(|r| std::cmp::Reverse(r.started_ms));
+    records.truncate(limit);
+    Ok(records)
 }
 
 /// Most recent record for a bookmark (to pre-fill params).

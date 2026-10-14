@@ -1,24 +1,6 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type {
-  Bookmark,
-  CliStatus,
-  Reach,
-  RemoteFolder,
-  RemoteInventory,
-  Server,
-  ServerInfo,
-  DoctorReport,
-  RecentCommand,
-  ScriptScan,
-  FolderScan,
-  Inventory,
-  Library,
-  Preview,
-  RunInfo,
-  RunRecord,
-  Settings,
-} from "./types";
+import type { Bookmark, CliStatus, DoctorReport, FolderScan, Inventory, Library, Preview, Reach, RecentCommand, RemoteFolder, RemoteInventory, RunInfo, RunRecord, ScriptScan, Server, ServerInfo, Settings, SyncContact, SyncResult, SyncStatus } from "./types";
 
 export const inTauri = isTauri();
 
@@ -124,6 +106,13 @@ export const api = {
   scanRemoteFolder: (name: string, dir: string) => call<RemoteFolder>("scan_remote_folder", { name, dir }),
   paletteConnect: (name: string) => call<void>("palette_connect", { name }),
   cliStatus: () => call<CliStatus>("cli_status"),
+  syncStatus: () => call<SyncStatus>("sync_status"),
+  syncCheckToken: (token: string) => call<string>("sync_check_token", { token }),
+  syncWaitForStart: (token: string) => call<SyncContact>("sync_wait_for_start", { token }),
+  syncFinishSetup: (token: string, bot: string, contact: SyncContact, passphrase: string, device: string) =>
+    call<void>("sync_finish_setup", { token, bot, chatId: contact.chat_id, userId: contact.user_id, passphrase, device }),
+  syncNow: () => call<SyncResult>("sync_now"),
+  syncForget: () => call<void>("sync_forget"),
   installCli: () => call<string>("install_cli"),
   runDoctor: () => call<DoctorReport>("run_doctor"),
   getInbox: (limit: number) => call<RecentCommand[]>("get_inbox", { limit }),

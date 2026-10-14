@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Copy, FolderGit2, RefreshCw, TerminalSquare, X } from "lucide-react";
+import { CheckCircle2, Copy, ExternalLink, FolderGit2, Loader2, RefreshCw, Send, TerminalSquare, X } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, copyText, inTauri } from "../lib/api";
 import { keys, useInventory, useLibrary } from "../lib/queries";
 import { isLinux, isMac, isWindows, kbd, shellSetup, trayName } from "../lib/platform";
-import type { Settings } from "../lib/types";
+import type { Settings, SyncContact } from "../lib/types";
+import { relativeTime } from "../lib/utils";
 import { useTheme } from "../stores/theme";
 import { Button, Field, IconButton, Input, Select, Switch } from "../components/ui";
 
@@ -347,6 +348,8 @@ export function SettingsView() {
             )}
           </Group>
 
+          <SyncGroup />
+
           <Group title="Projects" description="Repos with a .bk.toml. Their bookmarks live in the repo and can be committed.">
             {lib.projects.length === 0 && <p className="text-xs text-faint">None yet. Use + next to Projects in the sidebar.</p>}
             {lib.projects.map((p) => (
@@ -434,3 +437,244 @@ export function SettingsView() {
     </div>
   );
 }
+
+function openLink(url: string) {
+  if (inTauri) void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url));
+  else window.open(url, "_blank");
+}
+
+type SetupStep = { at: "token" } | { at: "start"; bot: string } | { at: "passphrase"; bot: string; contact: SyncContact };
+
+/** Settings → Sync: connect this device to the user's Telegram bot, then sync on demand. */
+function SyncGroup() {
+  const qc = useQueryClient();
+  const { data: st, refetch } = useQuery({ queryKey: ["sync-status"], queryFn: api.syncStatus });
+  const [step, setStep] = useState<SetupStep | null>(null);
+  const [token, setToken] = useState("");
+  const [pass, setPass] = useState("");
+  const [pass2, setPass2] = useState("");
+  const [device, setDevice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshAll = async () => {
+    await refetch();
+    await qc.invalidateQueries({ queryKey: keys.library });
+    await qc.invalidateQueries({ queryKey: ["history"] });
+    await qc.invalidateQueries({ queryKey: ["servers"] });
+  };
+
+  const syncNow = async () => {
+    setBusy(true);
+    try {
+      const r = await api.syncNow();
+      toast.success(`Synced: ${r.line}`, { description: [...r.skipped.map((x) => `Skipped ${x}`), r.warning].filter(Boolean).join("\n") || undefined });
+      await refreshAll();
+    } catch (e) {
+      toast.error("Sync failed", { description: String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Step 2 waits for the user to press Start in Telegram.
+  useEffect(() => {
+    if (step?.at !== "start") return;
+    let cancelled = false;
+    setError(null);
+    api
+      .syncWaitForStart(token)
+      .then((contact) => !cancelled && setStep({ at: "passphrase", bot: step.bot, contact }))
+      .catch((e) => !cancelled && setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step?.at]);
+
+  const description = (
+    <>
+      Keep bookmarks, servers, settings and run history the same on all your devices, through a Telegram bot only you use.
+      Everything is encrypted on this device before it's sent.
+    </>
+  );
+
+  if (!st) return null;
+
+  if (st.configured && !step) {
+    return (
+      <Group title="Sync" description={description}>
+        <div className="flex items-center gap-3 rounded-lg border border-line px-3 py-2.5 text-xs">
+          <Send size={15} className="shrink-0 text-muted" />
+          <div className="min-w-0 flex-1">
+            <div className="text-fg">
+              <b>{st.device}</b> syncs with <code className="font-mono">@{st.bot}</code>
+            </div>
+            <div className="text-muted">
+              {st.last_sync_ms ? `Last synced ${relativeTime(st.last_sync_ms)} · ${st.last_summary ?? ""}` : "Not synced yet"}
+            </div>
+          </div>
+          <Button size="sm" variant="primary" disabled={busy} onClick={() => void syncNow()}>
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Sync now
+          </Button>
+        </div>
+        <div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={async () => {
+              if (!window.confirm("Stop syncing on this device? Your bookmarks stay; the chat in Telegram is left as it is.")) return;
+              await api.syncForget();
+              await refetch();
+            }}
+          >
+            Stop syncing on this device
+          </Button>
+        </div>
+      </Group>
+    );
+  }
+
+  if (!step) {
+    return (
+      <Group title="Sync" description={description}>
+        <div>
+          <Button onClick={() => setStep({ at: "token" })}>
+            <Send size={13} /> Set up sync
+          </Button>
+        </div>
+      </Group>
+    );
+  }
+
+  const cancel = (
+    <Button
+      variant="ghost"
+      onClick={() => {
+        setStep(null);
+        setError(null);
+      }}
+    >
+      Cancel
+    </Button>
+  );
+
+  return (
+    <Group title="Sync" description={description}>
+      {step.at === "token" && (
+        <>
+          <p className="text-xs leading-relaxed text-muted">
+            <b className="text-fg">1.</b> In Telegram, message{" "}
+            <button className="font-medium text-accent hover:underline" onClick={() => openLink("https://t.me/BotFather")}>
+              @BotFather
+            </button>
+            , send <code className="font-mono">/newbot</code>, pick a name, and paste the token it gives you. Keep the token private.
+          </p>
+          <Field label="Bot token" error={error}>
+            <Input mono type="password" value={token} onChange={(e) => setToken(e.target.value.trim())} placeholder="123456789:AA…" autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Button
+              variant="primary"
+              disabled={!token || busy}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                try {
+                  setStep({ at: "start", bot: await api.syncCheckToken(token) });
+                } catch (e) {
+                  setError(String(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              {busy ? "Checking…" : "Continue"}
+            </Button>
+            {cancel}
+          </div>
+        </>
+      )}
+
+      {step.at === "start" && (
+        <>
+          <p className="text-xs leading-relaxed text-muted">
+            <b className="text-fg">2.</b> Open your bot in Telegram and press <b>Start</b>, so it knows which chat to keep your sync data in.
+          </p>
+          <div className="flex items-center gap-3">
+            <Button onClick={() => openLink(`https://t.me/${step.bot}`)}>
+              <ExternalLink size={13} /> Open @{step.bot}
+            </Button>
+            {!error && (
+              <span className="flex items-center gap-1.5 text-xs text-muted">
+                <Loader2 size={12} className="animate-spin" /> Waiting for Start…
+              </span>
+            )}
+          </div>
+          {error && (
+            <div className="flex items-center gap-2">
+              <p className="flex-1 text-xs text-err">{error}</p>
+              <Button size="sm" onClick={() => setStep({ at: "start", bot: step.bot })}>
+                Try again
+              </Button>
+            </div>
+          )}
+          <div>{cancel}</div>
+        </>
+      )}
+
+      {step.at === "passphrase" && (
+        <>
+          <p className="text-xs leading-relaxed text-muted">
+            <b className="text-fg">3.</b>{" "}
+            {step.contact.has_data
+              ? "This bot already holds synced data: enter the passphrase your other devices use."
+              : "Choose a passphrase. You'll enter it once on each device; it can't be recovered."}
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Passphrase" error={error}>
+              <Input type="password" value={pass} onChange={(e) => setPass(e.target.value)} autoFocus />
+            </Field>
+            {!step.contact.has_data && (
+              <Field label="Repeat it" error={pass2 && pass2 !== pass ? "Doesn't match" : null}>
+                <Input type="password" value={pass2} onChange={(e) => setPass2(e.target.value)} />
+              </Field>
+            )}
+          </div>
+          <Field label="Name for this device">
+            <Input className="w-[260px]" value={device} placeholder={st.default_device} onChange={(e) => setDevice(e.target.value)} />
+          </Field>
+          <div className="flex gap-2">
+            <Button
+              variant="primary"
+              disabled={busy || pass.length < 8 || (!step.contact.has_data && pass !== pass2)}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                try {
+                  await api.syncFinishSetup(token, step.bot, step.contact, pass, device || st.default_device);
+                  setStep(null);
+                  setPass("");
+                  setPass2("");
+                  setToken("");
+                  await refetch();
+                  setBusy(false);
+                  await syncNow();
+                } catch (e) {
+                  setError(String(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              {busy ? "Connecting…" : "Finish and sync"}
+            </Button>
+            {cancel}
+          </div>
+          {pass.length > 0 && pass.length < 8 && <p className="text-xs text-faint">At least 8 characters.</p>}
+        </>
+      )}
+    </Group>
+  );
+}
+

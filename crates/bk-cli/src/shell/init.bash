@@ -103,7 +103,7 @@ if [[ -z ${__BK_BASH_LOADED-} ]]; then
 
   __bk_complete() {
     local cur=${COMP_WORDS[COMP_CWORD]}
-    local subcmds="add save run ls show edit rm mv go history doctor trust export import init app scan server servers ssh"
+    local subcmds="add save run ls show edit rm mv go history doctor trust export import init app scan server servers ssh sync"
     if (( COMP_CWORD == 1 )); then
       COMPREPLY=($(compgen -W "$(command bk ls --names 2>/dev/null) $subcmds" -- "$cur"))
     elif (( COMP_CWORD == 2 )) && [[ ${COMP_WORDS[1]} =~ ^(run|show|rm|remove|mv|rename|go|edit|history|export)$ ]]; then

@@ -116,6 +116,9 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
 
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    if bk_core::sync::SyncConfig::load(&app.state::<AppState>().paths).is_some() {
+        items.push(Box::new(MenuItem::with_id(app, "sync", "Sync Now", true, None::<&str>)?));
+    }
     items.push(Box::new(MenuItem::with_id(app, "quit", "Quit Clibooker", true, Some("CmdOrCtrl+Q"))?));
     let refs: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(|b| b.as_ref()).collect();
     Menu::with_items(app, &refs)
@@ -126,6 +129,7 @@ fn handle(app: &AppHandle, id: &str) {
         "open" => palette::show_main(app),
         "palette" => palette::toggle(app),
         "quit" => crate::request_quit(app),
+        "sync" => crate::sync_cmds::sync_from_tray(app),
         _ => {
             if let Some(entry_id) = id.strip_prefix("run:") {
                 palette::request_run(app, entry_id.to_string(), None);

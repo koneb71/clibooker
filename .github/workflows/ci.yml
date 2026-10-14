@@ -77,4 +77,4 @@ jobs:
         run: cargo clippy ${{ matrix.crates }} --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test ${{ matrix.crates }}
+        run: cargo test ${{ matrix.crates }} --no-fail-fast

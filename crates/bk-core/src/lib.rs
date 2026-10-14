@@ -17,6 +17,7 @@ pub mod scripts;
 pub mod servers;
 pub mod shell;
 pub mod store;
+pub mod sync;
 pub mod template;
 pub mod trust;
 
