@@ -64,14 +64,21 @@ pub fn prelude(entry: &Entry, default_cwd: &Path, base: &EnvMap) -> Vec<String> 
             parts.push(format!("conda activate {}", q_path(&paths::resolve(p, &cwd))))
         }
         EnvSpec::Conda { .. } => {}
-        EnvSpec::Venv { path } => parts.push(format!(". {}", q_path(&paths::resolve(path, &cwd).join("bin/activate")))),
+        // `bin/activate`, or `Scripts/activate` for a Windows venv (Git Bash).
+        EnvSpec::Venv { path } => {
+            let dir = venv::root_of(paths::resolve(path, &cwd));
+            parts.push(format!(". {}", q_path(&venv::bin_dir(&dir).join("activate"))))
+        }
         EnvSpec::Uv { sync } => {
             if *sync {
                 parts.push("uv sync".into());
             }
-            parts.push(format!(". {}", q_path(&venv::uv_env_dir(&cwd, base).join("bin/activate"))));
+            parts.push(format!(". {}", q_path(&venv::bin_dir(&venv::uv_env_dir(&cwd, base)).join("activate"))));
         }
-        EnvSpec::Poetry => parts.push(r#". "$(poetry env info --path)/bin/activate""#.into()),
+        EnvSpec::Poetry => {
+            let sub = if cfg!(windows) { "Scripts" } else { "bin" };
+            parts.push(format!(r#". "$(poetry env info --path)/{sub}/activate""#))
+        }
         EnvSpec::Pyenv { version } => parts.push(format!("export PYENV_VERSION={}", q(version))),
         EnvSpec::Mise => parts.push(r#"eval "$(mise env -s bash)""#.into()),
     }
@@ -296,6 +303,22 @@ mod tests {
         let s = one_liner(&e, &BTreeMap::new(), &[], &home, &EnvMap::new()).unwrap();
         assert_eq!(s, "( cd ~/w && . ~/w/.venv/bin/activate && python t.py )");
         assert_eq!(enter_script(&e, &home, &EnvMap::new()), "cd ~/w && . ~/w/.venv/bin/activate");
+    }
+
+    /// A venv made by Windows Python (e.g. used from Git Bash) activates from `Scripts`.
+    #[test]
+    fn windows_venv_in_posix_dialect() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join(".venv/Scripts")).unwrap();
+        std::fs::write(d.path().join(".venv/pyvenv.cfg"), "").unwrap();
+        let b = Bookmark {
+            cwd: Some(d.path().display().to_string()),
+            env: EnvSpec::Venv { path: ".venv/Scripts".into() },
+            command: Some("python t.py".into()),
+            ..Default::default()
+        };
+        let s = one_liner(&entry(b), &BTreeMap::new(), &[], Path::new("/"), &EnvMap::new()).unwrap();
+        assert!(s.contains(".venv/Scripts/activate") && !s.contains("Scripts/Scripts"), "{s}");
     }
 
     #[test]

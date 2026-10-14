@@ -21,7 +21,8 @@ pub fn from_active(env: &EnvMap, cwd: &Path) -> Option<EnvSpec> {
     if name == "base" || name == "root" {
         return None;
     }
-    if name.contains('/') {
+    // Activated by path (`conda activate ./env`, or `C:\...\envs\x` on Windows): keep the prefix.
+    if name.contains(['/', '\\']) || Path::new(&name).is_absolute() {
         return Some(EnvSpec::Conda { name: None, prefix: Some(paths::contract_tilde(Path::new(&name))) });
     }
     Some(EnvSpec::Conda { name: Some(name), prefix: None })
@@ -115,12 +116,12 @@ pub fn detect(env: &EnvMap, cwd: &Path) -> EnvSpec {
 
 fn relative_or_tilde(p: &Path, cwd: &Path) -> String {
     if let Ok(rest) = p.strip_prefix(cwd) {
-        return rest.display().to_string();
+        return paths::portable(rest);
     }
     // `../.venv` when the venv is in an ancestor project dir.
     for (depth, anc) in cwd.ancestors().enumerate().skip(1).take(4) {
         if let Ok(rest) = p.strip_prefix(anc) {
-            return format!("{}{}", "../".repeat(depth), rest.display());
+            return format!("{}{}", "../".repeat(depth), paths::portable(rest));
         }
     }
     paths::contract_tilde(p)
@@ -159,6 +160,13 @@ mod tests {
         assert_eq!(from_active(&env, cwd), Some(EnvSpec::Conda { name: Some("sam2".into()), prefix: None }));
         let env: EnvMap = [("VIRTUAL_ENV".into(), OsString::from("/w/p/.venv"))].into();
         assert_eq!(from_active(&env, cwd), Some(EnvSpec::Venv { path: ".venv".into() }));
+        let env: EnvMap = [("VIRTUAL_ENV".into(), OsString::from("/w/p/sub/env"))].into();
+        assert_eq!(from_active(&env, cwd), Some(EnvSpec::Venv { path: "sub/env".into() }), "stored with `/`");
+        // An env activated by path keeps its prefix, including a Windows one.
+        for p in [r"C:\Users\me\envs\x", "/opt/envs/x"] {
+            let env: EnvMap = [("CONDA_DEFAULT_ENV".into(), OsString::from(p))].into();
+            assert!(matches!(from_active(&env, cwd), Some(EnvSpec::Conda { name: None, prefix: Some(_) })), "{p}");
+        }
     }
 
     #[test]

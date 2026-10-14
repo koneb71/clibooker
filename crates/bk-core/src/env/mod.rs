@@ -197,7 +197,7 @@ pub fn activate(spec: &EnvSpec, cwd: &Path, base: &EnvMap, mode: Mode) -> Result
             (env, format!("conda env {label} ({})", paths::contract_tilde(&target_prefix)), spec.clone())
         }
         EnvSpec::Venv { path } => {
-            let dir = paths::resolve(path, cwd);
+            let dir = venv::root_of(paths::resolve(path, cwd));
             if !venv::is_venv(&dir) {
                 bail!("no virtualenv at {} (create it with `python -m venv {path}`)", dir.display());
             }

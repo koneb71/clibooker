@@ -48,8 +48,7 @@ pub fn parse(text: &str) -> Vec<RecentCommand> {
             }
             let env = if !venv.is_empty() {
                 let v = Path::new(&venv);
-                let rel =
-                    v.strip_prefix(&cwd).map(|r| r.display().to_string()).unwrap_or_else(|_| paths::contract_tilde(v));
+                let rel = v.strip_prefix(&cwd).map(paths::portable).unwrap_or_else(|_| paths::contract_tilde(v));
                 Some(EnvSpec::Venv { path: rel })
             } else if !conda.is_empty() && conda != "base" {
                 Some(EnvSpec::Conda { name: Some(conda), prefix: None })

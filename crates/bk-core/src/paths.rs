@@ -42,6 +42,10 @@ impl Paths {
     pub fn projects_file(&self) -> PathBuf {
         self.data_dir.join("projects.json")
     }
+    /// Where folders from other devices live on this one (never synced).
+    pub fn folders_file(&self) -> PathBuf {
+        self.data_dir.join("folders.toml")
+    }
 }
 
 fn non_empty_var(key: &str) -> Option<String> {
@@ -68,16 +72,37 @@ pub fn home() -> PathBuf {
     env::home_dir().unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
 }
 
-/// Expand a leading `~` / `~/` (and `~\` on Windows).
+/// Expand a leading `~` / `~/` / `~\` (the last as written on Windows, accepted on any OS).
 pub fn expand_tilde(s: &str) -> PathBuf {
     if s == "~" {
         return home();
     }
-    let rest = s.strip_prefix("~/").or_else(|| if cfg!(windows) { s.strip_prefix("~\\") } else { None });
-    match rest {
-        Some(rest) => normalize(&home().join(rest)),
+    match s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")) {
+        Some(rest) => normalize(&home().join(&*portable_str(rest))),
         None => PathBuf::from(s),
     }
+}
+
+/// A relative path written with `/` whatever the OS, so it reads the same everywhere.
+pub fn portable(rel: &Path) -> String {
+    let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    parts.join("/")
+}
+
+/// Off Windows, a relative path written on Windows (`web\app`) means `web/app`.
+fn portable_str(s: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) || !s.contains('\\') || s.contains('/') || is_windows_absolute(s) {
+        s.into()
+    } else {
+        s.replace('\\', "/").into()
+    }
+}
+
+/// `C:\x`, `C:/x` or `\\server\share`: a path that is absolute on Windows.
+pub fn is_windows_absolute(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+        || s.starts_with("\\\\")
 }
 
 /// Replace the home prefix with `~` for storage/display. Always uses `/` after `~`, so stored
@@ -118,7 +143,7 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 
 /// Resolve a user-written path: expand `~`, make relative paths relative to `base`, normalize `.`/`..`.
 pub fn resolve(s: &str, base: &Path) -> PathBuf {
-    let p = expand_tilde(s);
+    let p = expand_tilde(&portable_str(s));
     let joined = if p.is_absolute() { p } else { base.join(p) };
     normalize(&joined)
 }
@@ -172,6 +197,12 @@ mod tests {
         assert_eq!(contract_tilde(Path::new("/etc")), "/etc");
         assert_eq!(resolve("frontend/../api", Path::new("/r/p")), PathBuf::from("/r/p/api"));
         assert_eq!(resolve("/abs", Path::new("/r")), PathBuf::from("/abs"));
+        // Written on Windows by older versions: `\` separators in a relative path.
+        assert_eq!(resolve(r"web\app", Path::new("/r")), PathBuf::from("/r/web/app"));
+        assert_eq!(expand_tilde(r"~\a\b"), home().join("a").join("b"));
+        assert!(is_windows_absolute(r"D:\dev") && is_windows_absolute("d:/dev") && is_windows_absolute(r"\\srv\x"));
+        assert!(!is_windows_absolute("/dev") && !is_windows_absolute("dev"));
+        assert_eq!(portable(Path::new("a/b")), "a/b");
         assert!(same_path(Path::new("/a/b/"), Path::new("/a/b")));
         assert!(!same_path(Path::new("/a/B"), Path::new("/a/b")));
     }

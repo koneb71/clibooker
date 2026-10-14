@@ -104,7 +104,9 @@ pub fn prelude(entry: &Entry, default_cwd: &Path, base: &EnvMap) -> Vec<String> 
                 parts.push(format!("conda activate {}", pwsh_quote(&target)));
             }
         }
-        EnvSpec::Venv { path } => parts.push(format!("& {}", qp(&activate_script(&paths::resolve(path, &cwd))))),
+        EnvSpec::Venv { path } => {
+            parts.push(format!("& {}", qp(&activate_script(&venv::root_of(paths::resolve(path, &cwd))))))
+        }
         EnvSpec::Uv { sync } => {
             if *sync {
                 parts.push("uv sync".into());

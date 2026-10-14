@@ -14,6 +14,16 @@ pub fn is_venv(dir: &Path) -> bool {
         || dir.join("Scripts").join("python.exe").exists()
 }
 
+/// The venv a path names: the path itself, or its parent when the path is the venv's
+/// `bin` / `Scripts` folder (`venv:.venv/bin`, `.venv\Scripts`).
+pub fn root_of(dir: PathBuf) -> PathBuf {
+    let names_bin = dir.file_name().is_some_and(|n| n.eq_ignore_ascii_case("bin") || n.eq_ignore_ascii_case("scripts"));
+    match dir.parent() {
+        Some(parent) if names_bin && !is_venv(&dir) && is_venv(parent) => parent.to_path_buf(),
+        _ => dir,
+    }
+}
+
 /// A venv's executables folder: `Scripts` for Windows Python, `bin` elsewhere (and for
 /// MSYS2/Cygwin Python on Windows).
 pub fn bin_dir(venv: &Path) -> PathBuf {
@@ -96,6 +106,20 @@ mod tests {
         assert_eq!(super::super::get(&env, "PATH").unwrap(), expected);
         assert_eq!(super::super::get_string(&env, "VIRTUAL_ENV").unwrap(), "/p/.venv");
         assert!(super::super::get(&env, "PYTHONHOME").is_none());
+    }
+
+    #[test]
+    fn root_of_steps_up_from_the_bin_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let v = d.path().join(".venv");
+        std::fs::create_dir_all(v.join("Scripts")).unwrap();
+        std::fs::write(v.join("pyvenv.cfg"), "").unwrap();
+        assert_eq!(root_of(v.join("Scripts")), v);
+        assert_eq!(root_of(v.join("bin")), v);
+        assert_eq!(root_of(v.clone()), v);
+        // Not a venv's bin folder: unchanged.
+        assert_eq!(root_of(d.path().join("bin")), d.path().join("bin"));
+        assert_eq!(bin_dir(&v), v.join("Scripts"), "a Windows venv has Scripts, whatever the OS");
     }
 
     #[test]
