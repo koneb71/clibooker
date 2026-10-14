@@ -87,7 +87,8 @@ fn classify(p: &Path, config_file: &Path, data_dir: &Path) -> u8 {
         return match name {
             "history.jsonl" => HISTORY,
             "recent.log" => INBOX,
-            "projects.json" | "trust.json" => LIBRARY,
+            // Folder mappings change where bookmarks' folders are found.
+            "projects.json" | "trust.json" | "folders.toml" => LIBRARY,
             _ => 0,
         };
     }
@@ -111,6 +112,7 @@ mod tests {
         assert_eq!(classify(Path::new("/w/p/.bk.toml"), cfg, data), LIBRARY);
         assert_eq!(classify(Path::new("/h/.local/share/bk/history.jsonl"), cfg, data), HISTORY);
         assert_eq!(classify(Path::new("/h/.local/share/bk/recent.log"), cfg, data), INBOX);
+        assert_eq!(classify(Path::new("/h/.local/share/bk/folders.toml"), cfg, data), LIBRARY);
         assert_eq!(classify(Path::new("/w/p/README.md"), cfg, data), 0);
     }
 }

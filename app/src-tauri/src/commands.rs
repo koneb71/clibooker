@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use bk_core::env::{Mode, discover};
+use bk_core::folders::{FolderMap, Located, Suggester};
 use bk_core::history::{self, RunRecord};
 use bk_core::plan::{self, PlanSummary, RunRequest};
 use bk_core::remote::{self, RemoteInputs};
 use bk_core::template::{self, Param};
-use bk_core::{Bookmark, Entry, Scope, Settings, paths, projects, render, store, trust};
+use bk_core::{Bookmark, Entry, Os, Scope, Settings, doctor, paths, projects, render, store, sync, trust};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -40,6 +41,8 @@ pub struct EntryDto {
     project_dir: Option<String>,
     /// Resolved working directory (display form, with `~`).
     cwd: Option<String>,
+    /// Where the folder is on this device (`None`: server bookmarks, or no folder of its own).
+    folder: Option<FolderDto>,
     bookmark: Bookmark,
     params: Vec<Param>,
     summary: String,
@@ -47,6 +50,44 @@ pub struct EntryDto {
     /// Project files must be approved before their bookmarks run.
     trusted: bool,
     last_run: Option<RunRecord>,
+}
+
+#[derive(Serialize)]
+pub struct FolderDto {
+    /// `here`, `mapped` or `missing`.
+    state: &'static str,
+    /// Where it is (or would be) on this device, with `~`.
+    path: String,
+    /// The mapping it's found through.
+    via: Option<FolderRuleRef>,
+    /// The OS a missing folder's path was written on, when it's clearly another one.
+    foreign: Option<&'static str>,
+    /// A folder on this device that may be the missing one.
+    suggestion: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FolderRuleRef {
+    shared: String,
+    local: String,
+}
+
+fn folder_dto(e: &Entry, suggest: &dyn Fn(&str) -> Option<String>) -> Option<FolderDto> {
+    Some(match e.folder()? {
+        Located::Here(p) => {
+            FolderDto { state: "here", path: paths::contract_tilde(&p), via: None, foreign: None, suggestion: None }
+        }
+        Located::Mapped { path, shared, local } => FolderDto {
+            state: "mapped",
+            path: paths::contract_tilde(&path),
+            via: Some(FolderRuleRef { shared, local }),
+            foreign: None,
+            suggestion: None,
+        },
+        Located::Missing { written, foreign, .. } => {
+            FolderDto { state: "missing", suggestion: suggest(&written), path: written, via: None, foreign }
+        }
+    })
 }
 
 #[derive(Serialize)]
@@ -69,9 +110,19 @@ pub struct LibraryDto {
     default_hotkey: &'static str,
     default_terminal: &'static str,
     shell: String,
+    /// The shell steps run in when neither the bookmark nor settings pick one.
+    default_step_shell: String,
+    /// This device's name (the one it syncs as).
+    device: String,
 }
 
-fn entry_dto(e: &Entry, shadowed: bool, trusted: bool, last_run: Option<RunRecord>) -> EntryDto {
+fn entry_dto(
+    e: &Entry,
+    shadowed: bool,
+    trusted: bool,
+    last_run: Option<RunRecord>,
+    folder: Option<FolderDto>,
+) -> EntryDto {
     EntryDto {
         id: e.id.clone(),
         name: e.name.clone(),
@@ -79,6 +130,7 @@ fn entry_dto(e: &Entry, shadowed: bool, trusted: bool, last_run: Option<RunRecor
         file: e.file.display().to_string(),
         project_dir: (e.scope == Scope::Project).then(|| paths::contract_tilde(&e.base_dir)),
         cwd: e.cwd().map(|c| paths::contract_tilde(&c)),
+        folder,
         bookmark: e.bookmark.clone(),
         params: template::bookmark_params(&e.bookmark),
         summary: e.bookmark.summary(),
@@ -98,12 +150,18 @@ pub fn get_library(app: AppHandle, state: State<'_, AppState>) -> LibraryDto {
     for r in history::read(&state.paths.history_file(), 5000, None).unwrap_or_default() {
         last.entry(r.entry_id.clone()).or_insert(r);
     }
+    // Built only if a folder is missing (it looks at every other bookmark's folder).
+    let suggester = std::cell::OnceCell::new();
+    let suggest = |written: &str| {
+        let s = suggester.get_or_init(|| Suggester::new(&lib, &doctor::project_dirs(&state.paths)));
+        s.suggest(written).first().map(|p| paths::contract_tilde(p))
+    };
     let entries = lib
         .entries
         .iter()
         .map(|e| {
             let trusted = trust::is_trusted(&state.paths, &e.file);
-            entry_dto(e, lib.is_shadowed(e), trusted, last.get(&e.id).cloned())
+            entry_dto(e, lib.is_shadowed(e), trusted, last.get(&e.id).cloned(), folder_dto(e, &suggest))
         })
         .collect();
     let projects = state
@@ -129,6 +187,8 @@ pub fn get_library(app: AppHandle, state: State<'_, AppState>) -> LibraryDto {
         default_hotkey: crate::palette::DEFAULT_HOTKEY,
         default_terminal: crate::external_term::default_terminal(),
         shell: user_shell_name(&state.base_env()),
+        default_step_shell: lib.settings.shell.clone().unwrap_or_else(|| plan::default_shell(&state.base_env())),
+        device: sync::this_device(&state.paths),
     }
 }
 
@@ -199,9 +259,12 @@ pub async fn get_inventory(state: State<'_, AppState>) -> CmdResult<discover::In
     Ok(discover::inventory(&state.base_env()))
 }
 
+/// What's in a folder (envs, scripts, .env files), found through this device's folder
+/// mappings when it isn't where it's written.
 #[tauri::command]
 pub fn scan_folder(state: State<'_, AppState>, path: String) -> discover::FolderScan {
-    discover::scan_folder(&paths::expand_tilde(&path), &state.base_env())
+    let here = FolderMap::load(&state.paths).find_here(&path, &paths::home()).into_path();
+    discover::scan_folder(&here, &state.base_env())
 }
 
 #[derive(Serialize)]
@@ -210,6 +273,9 @@ pub struct Preview {
     plan: Option<PlanSummary>,
     error: Option<String>,
     params: Vec<Param>,
+    /// Notes on what runs here, and steps written for another shell than the one that runs
+    /// them on this OS or on your other devices' OSes.
+    warnings: Vec<String>,
 }
 
 /// Validate a draft bookmark and show what it would run (never runs activation hooks).
@@ -223,7 +289,9 @@ pub async fn preview_bookmark(
 ) -> CmdResult<Preview> {
     let file = target_file(&state, file);
     let scope = if file == state.paths.config_file { Scope::Global } else { Scope::Project };
-    let entry = Entry::new(if name.is_empty() { "untitled" } else { &name }, scope, &file, bookmark);
+    let lib = state.library();
+    let entry = Entry::new(if name.is_empty() { "untitled" } else { &name }, scope, &file, bookmark)
+        .with_folders(lib.folders.clone());
     let declared = template::bookmark_params(&entry.bookmark);
     let mut values = params;
     for p in &declared {
@@ -233,12 +301,11 @@ pub async fn preview_bookmark(
     }
     let base = state.base_env();
     let home = paths::home();
-    let mut out = Preview { one_liner: None, plan: None, error: None, params: declared };
+    let mut out = Preview { one_liner: None, plan: None, error: None, params: declared, warnings: Vec::new() };
     if let Err(e) = entry.bookmark.validate() {
         out.error = Some(e);
         return Ok(out);
     }
-    let lib = state.library();
     if entry.bookmark.is_remote() {
         let inp = RemoteInputs {
             servers: &lib.servers,
@@ -261,8 +328,21 @@ pub async fn preview_bookmark(
     out.one_liner = render::one_liner_for(render::Dialect::native(), &entry, &values, &[], &home, &base).ok();
     let req = RunRequest { params: values, default_cwd: home, ..Default::default() };
     match plan::build(&entry, &req, &base, &lib.settings, Mode::Check) {
-        Ok(p) => out.plan = Some(p.summary()),
+        Ok(p) => {
+            out.warnings.extend(p.notes.iter().cloned());
+            out.plan = Some(p.summary());
+        }
         Err(e) => out.error = Some(anyhow_err(e)),
+    }
+    // This OS first, then the OSes of the other devices that sync.
+    let mut oses = vec![Os::current()];
+    for d in sync::State::load(&state.paths).devices.values() {
+        if let Some(os) = Os::parse(&d.os).filter(|os| !oses.contains(os)) {
+            oses.push(os);
+        }
+    }
+    for m in doctor::shell_mismatches(&entry.bookmark, &lib.settings, &base, &oses) {
+        out.warnings.push(m.message(m.os == Os::current()));
     }
     Ok(out)
 }
@@ -409,6 +489,10 @@ pub async fn start_run(
     .await
     .map_err(err)?
     .map_err(anyhow_err)?;
+    let mut spawn = spawn;
+    if let Some(rec) = spawn.record.as_mut() {
+        rec.device = Some(sync::this_device(&state.paths));
+    }
     state.runs.start(app, spawn, opts, ctl.as_ref()).map_err(anyhow_err)
 }
 

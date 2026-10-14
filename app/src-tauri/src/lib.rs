@@ -1,5 +1,7 @@
+mod autosync;
 mod commands;
 mod external_term;
+mod folders_cmds;
 #[cfg(windows)]
 mod job;
 mod markers;
@@ -98,6 +100,8 @@ pub fn run() {
                 Err(e) => eprintln!("file watcher unavailable: {e}"),
             }
 
+            autosync::start(app.handle());
+
             if let Err(e) = tray::create(app.handle()) {
                 eprintln!("no tray icon ({e}); closing the window will quit");
             }
@@ -136,6 +140,8 @@ pub fn run() {
             WindowEvent::Focused(false) if window.label() == "palette" => {
                 let _ = window.hide();
             }
+            // Back to the app: maybe another device sent something meanwhile.
+            WindowEvent::Focused(true) if window.label() == "main" => autosync::nudge(window.app_handle()),
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
@@ -185,6 +191,11 @@ pub fn run() {
             sync_cmds::sync_finish_setup,
             sync_cmds::sync_now,
             sync_cmds::sync_forget,
+            sync_cmds::sync_set_auto,
+            folders_cmds::folders_list,
+            folders_cmds::folders_set,
+            folders_cmds::folders_remove,
+            folders_cmds::locate_folder,
             external_term::open_in_terminal,
             palette::set_hotkey,
             palette::hotkey_error,
