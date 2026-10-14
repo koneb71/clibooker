@@ -124,3 +124,33 @@ fn powershell_hook_and_save() {
     let go = std::fs::read_to_string(format!("{}.go", session.display())).unwrap();
     assert!(go.starts_with("Set-Location -LiteralPath"), "{go}");
 }
+
+/// Bookmarks written on a Mac, run on Windows: the `windows` command runs here, `zsh` gives way
+/// to Git Bash, POSIX syntax bound for PowerShell is flagged, and project folders are stored
+/// with `/` so they work on every OS.
+#[test]
+fn bookmarks_from_another_os() {
+    let s = Sandbox::new();
+    std::fs::create_dir_all(s.config().parent().unwrap()).unwrap();
+    std::fs::write(
+        s.config(),
+        "[bookmarks.clean]\ncommand = 'rm -rf build'\nwindows = { command = 'Write-Output from-windows' }\n\n\
+         [bookmarks.z]\ncommand = 'echo from-bash'\nshell = 'zsh'\n",
+    )
+    .unwrap();
+    s.bk().arg("clean").assert().success().stdout(contains("from-windows"));
+    // The runners have Git for Windows, not zsh.
+    s.bk()
+        .arg("z")
+        .assert()
+        .success()
+        .stdout(contains("from-bash"))
+        .stderr(contains("zsh isn't installed here; bash runs these steps"));
+    s.add(&["exp", "export A=1"]);
+    s.bk().arg("doctor").assert().stderr(contains("runs in PowerShell here"));
+
+    std::fs::create_dir_all(s.path().join("web").join("app")).unwrap();
+    s.add(&["sub", "cmd /c exit 0", "--project", "--cwd", "web\\app"]);
+    let project = std::fs::read_to_string(s.path().join(".bk.toml")).unwrap();
+    assert!(project.contains("cwd = \"web/app\""), "{project}");
+}

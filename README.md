@@ -45,6 +45,7 @@ It comes in two parts that share the same bookmarks file:
 - **Import / export** as TOML or JSON.
 - **Pop-out:** open a bookmark in Terminal, iTerm, Ghostty or Warp, or copy it as a one-liner.
 - **SSH servers:** connect to your servers, run bookmarks on them, forward ports, and keep long jobs running after you disconnect (see below).
+- **Many devices, many OSes:** bookmarks sync between your machines by themselves. Each device says where synced folders are on it, and a bookmark can run a different command on Windows, macOS or Linux (see [Sync between devices](#sync-between-devices)).
 
 ## Install
 
@@ -112,7 +113,9 @@ Add `--record` (e.g. `eval "$(bk init zsh --record)"`) to also feed the app's In
 | `bk trust [DIR]` | Approve a project's `.bk.toml` (`--revoke` to withdraw) |
 | `bk export [NAMES] [-o FILE] [--json]` · `bk import FILE [--on-conflict skip\|overwrite\|rename]` | Move bookmarks between machines |
 | `bk app` | Open the desktop app |
-| `bk sync` | Sync with your other devices · `bk sync setup` · `bk sync status` · `bk sync forget` |
+| `bk sync` | Sync with your other devices now · `bk sync setup` · `bk sync status` (devices, what's waiting) · `bk sync auto on\|off` · `bk sync forget` |
+| `bk locate NAME [DIR]` | Say where a bookmark's folder is on this device (DIR: the current folder) |
+| `bk folders` | Folders from your other devices and where they are here · `bk folders add SHARED LOCAL` · `bk folders rm SHARED` |
 | `bk ssh SERVER [-- cmd]` | Interactive SSH session (or run one command) |
 | `bk server add NAME user@host [-p PORT] [-i KEY] [-J JUMP] [-L 8888:127.0.0.1:8888] [-o K=V]` | Save a server · `bk server rm NAME` · `bk server unhide NAME` · `bk server scan NAME` |
 | `bk servers [--check]` | List servers (yours and `~/.ssh/config`) with connection status |
@@ -149,7 +152,22 @@ steps = [
   "alembic upgrade head",
   { run = "npm run dev", cwd = "web", continue_on_error = true },
 ]
+
+[bookmarks.clean]
+cwd = "~/work/web"
+command = "rm -rf build dist && pnpm build"
+windows = { command = "Remove-Item -Recurse -Force build, dist; pnpm build" }
 ```
+
+### A different command on one OS
+
+A command is written in a shell's language, and shells differ by OS: `rm -rf build` is zsh, `Remove-Item -Recurse build` is PowerShell. `macos`, `linux` and `windows` say what runs instead on that OS, the way VS Code's `tasks.json` does:
+- They take `command` (or `steps`) and `shell`. A variant with its own command runs in that OS's default shell unless it names one: `windows = { command = "…", shell = "bash" }` runs in Git Bash.
+- `windows = { shell = "cmd" }` changes only the shell.
+- They sync with the bookmark, and server bookmarks don't take them (they run in the server's shell).
+- In the app, the command field's **Different on Windows, macOS or Linux?** adds one, starting from the command for all systems.
+- The editor and `bk doctor` flag steps written for another shell than the one that runs them, here and on the OSes of your other devices: `export A=1` that would run in PowerShell, `$env:A` that would run in zsh.
+- A bookmark naming a POSIX shell that isn't installed (`zsh` from a Mac on Windows, `/bin/zsh` on a Linux box without it) runs in bash instead, with a note. On Windows that's Git Bash. Likewise, `powershell` means `pwsh` off Windows.
 
 ### Language runtimes
 
@@ -246,14 +264,36 @@ Keep bookmarks, servers, settings and run history the same on all your machines 
 2. Run `bk sync setup` (or **Settings → Sync → Set up sync** in the app): paste the token, press **Start** in your bot's chat, and choose a passphrase.
 3. On each other device, run setup with the same token and passphrase.
 
-Then sync with `bk sync`, the **Sync now** button, or the tray menu. Syncing only happens when you ask. `bk sync status` shows the latest sync, and `bk sync forget` stops syncing on one device.
+From then on each device syncs by itself:
+- **The app** syncs shortly after it starts, a few seconds after you change something, and when another device has sent changes. It checks every couple of minutes, and whenever you come back to the window.
+- **The CLI** (for machines without the app) syncs in the background after a command when there's something to send, or when it hasn't synced for ten minutes. It never makes a command wait. Running a bookmark that isn't here yet (`bk train` right after making it on your laptop) syncs first.
+- **Offline**, syncing backs off and tries again; Settings → Sync says why it can't.
+
+**Sync now** (or `bk sync`, or the tray menu) syncs right away. `bk sync auto off` (or the switch in Settings) makes a device sync only when you ask. `bk sync status` lists your devices with their OS and last change, and what's waiting to be sent; `bk sync forget` stops syncing on one device. History shows which device each run came from.
 
 How it works:
 - **One snapshot:** your bot's chat holds a single pinned, encrypted snapshot (Argon2id + XChaCha20-Poly1305). Each sync downloads it, merges, and uploads a new one if this device had changes.
 - **Merging:** each bookmark, server and setting is merged on its own, and the most recent change wins, deletions included. Run history from all devices is combined.
 - **Settings:** shell, pop-out terminal, ssh program and hotkey are kept separately per OS, so a Windows setting never lands on a Mac. Theme and the rest are shared.
-- **Not synced:** project `.bk.toml` files (they live in their repos), trust approvals, the Inbox, and launch-at-login.
+- **Not synced:** project `.bk.toml` files (they live in their repos), trust approvals, the Inbox, launch-at-login, and [folder mappings](#folders-on-this-device).
+- **Per-OS commands** (`windows = { … }`) sync with their bookmark. A device on an older Clibooker keeps them unless it edits that bookmark itself, so update every device to use them.
 - **The bot token and derived key** stay in this device's data folder (`sync/config.json`, readable only by you). The passphrase is never stored, and it can't be recovered.
+
+### Folders on this device
+
+A bookmark synced from your Mac says `cwd = "~/work/sam2"`; on your Windows PC that project is in `D:\dev\sam2`. Changing the bookmark there would break it on the Mac, so each device keeps a small map of its own instead (`folders.toml` in its data folder, never synced):
+
+```toml
+"~/work" = "D:/dev"
+```
+
+- **Fixing it:** the first time a bookmark's folder isn't found, the app offers the folder of the same name it found next to your other projects ("Use D:\dev\sam2"), or a picker. `bk NAME` asks the same question, and `bk locate NAME [DIR]` says it directly.
+- **One answer covers its neighbours:** locating `~/work/ml/sam2` at `D:\dev\ml\sam2` maps `~/work` to `D:/dev`, so every bookmark under `~/work` is found too. When that mapping already serves other bookmarks, only this folder is mapped, so nothing that works breaks.
+- **Only a fallback:** a folder that exists as written is always used as written.
+- **Any OS's paths:** a Windows path is matched on a Mac and the other way round (`/` or `\`, drive letters without regard to case).
+- **Seeing them:** Settings → Folders on this device, or `bk folders`, lists the mappings and how many bookmarks each serves. The bookmark list, `bk ls`, `bk show` and `bk doctor` say when a folder isn't on this device or comes through a mapping.
+
+Paths under your home folder are stored as `~/…` with `/`, and project folders relative to the project, so most bookmarks need no mapping at all.
 
 ## Platforms
 
@@ -265,8 +305,11 @@ Bookmarks files are plain TOML and work on every OS. Paths under your home folde
 | History, trust, Inbox | `~/.local/share/bk` | `~/.local/share/bk` (`$XDG_DATA_HOME`) | `%LOCALAPPDATA%\bk` |
 | Steps run in | `$SHELL` if zsh/bash, else `sh` | same | PowerShell (`pwsh` if installed) |
 | Other step shells | any (`shell = "fish"`) | any | `cmd`, Git Bash (`shell = "bash"`), `powershell` |
+| A POSIX shell that isn't installed | bash, else `sh` | same | Git Bash |
 | `bk go`, Open in terminal | POSIX shell | POSIX shell | PowerShell |
 | Open in terminal | Terminal, iTerm, Ghostty, Warp | `$TERMINAL`, GNOME Terminal, Konsole, kitty, … | Windows Terminal or a PowerShell window |
+
+A bookmark can run a [different command on each OS](#a-different-command-on-one-os), and its folder can be [somewhere else on each device](#folders-on-this-device).
 
 Envs and runtimes behave the same everywhere:
 - Conda envs, venvs (`bin/` or `Scripts\`), uv and poetry all work.
@@ -287,6 +330,7 @@ cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings 
 cd app && pnpm typecheck
 cd app && pnpm tauri dev      # native app with hot reload
 cd app && pnpm dev            # UI only, in a browser, against an in-memory mock backend
+                              # (?platform=windows|linux shows another OS, ?synced starts with sync set up)
 ```
 
 ```
