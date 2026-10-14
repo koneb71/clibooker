@@ -53,6 +53,8 @@ pub struct RunPlan {
     pub env_changes: Vec<String>,
     pub params: BTreeMap<String, String>,
     pub steps: Vec<PlannedStep>,
+    /// Things worth a dim line before the run (e.g. bash standing in for zsh).
+    pub notes: Vec<String>,
 }
 
 impl RunPlan {
@@ -96,6 +98,7 @@ impl RunPlan {
             env_description: self.env_description.clone(),
             env_changes: self.env_changes.clone(),
             steps: self.steps.clone(),
+            notes: self.notes.clone(),
         }
     }
 }
@@ -122,6 +125,7 @@ pub struct PlanSummary {
     pub env_description: String,
     pub env_changes: Vec<String>,
     pub steps: Vec<PlannedStep>,
+    pub notes: Vec<String>,
 }
 
 pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings, mode: Mode) -> Result<RunPlan> {
@@ -170,8 +174,14 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
         env::set(&mut env, k.as_str(), v);
     }
 
-    let shell_name = b.shell.clone().or_else(|| settings.shell.clone()).unwrap_or_else(|| default_shell(base));
-    let (shell, shell_args) = resolve_shell(&shell_name, &env)?;
+    let shell_name = b
+        .effective_shell()
+        .map(str::to_string)
+        .or_else(|| settings.shell.clone())
+        .unwrap_or_else(|| default_shell(base));
+    let found = resolve_shell(&shell_name, &env)?;
+    let notes: Vec<String> = found.note().into_iter().collect();
+    let shell::Found { path: shell, args: shell_args, .. } = found;
     let shell_kind = ShellKind::of(&shell);
 
     let values = &req.params;
@@ -230,6 +240,7 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
         env_changes,
         params,
         steps,
+        notes,
     })
 }
 
@@ -239,7 +250,7 @@ pub fn default_shell(env: &EnvMap) -> String {
 }
 
 /// See [`shell::resolve`].
-pub fn resolve_shell(name: &str, env: &EnvMap) -> Result<(PathBuf, Vec<String>)> {
+pub fn resolve_shell(name: &str, env: &EnvMap) -> Result<shell::Found> {
     shell::resolve(name, env)
 }
 

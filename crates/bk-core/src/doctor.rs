@@ -5,9 +5,10 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::env::{self, EnvMap, Mode};
-use crate::model::Settings;
+use crate::model::{Bookmark, Os, Settings};
 use crate::paths;
 use crate::plan;
+use crate::shell::{self, ShellKind};
 use crate::store::{Entry, Library};
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,9 +120,19 @@ pub fn check_entry(e: &Entry, base: &EnvMap, settings: &Settings, default_cwd: &
             problems.push(format!(".env file {} not found", paths::contract_tilde(&p)));
         }
     }
-    let shell = b.shell.clone().or_else(|| settings.shell.clone()).unwrap_or_else(|| plan::default_shell(base));
-    if let Err(err) = plan::resolve_shell(&shell, base) {
-        problems.push(format!("{err:#}"));
+    let shell = shell_name_on(b, Os::current(), settings, base);
+    let runs_in = match plan::resolve_shell(&shell, base) {
+        Ok(found) => {
+            warnings.extend(found.note());
+            ShellKind::of(&found.path)
+        }
+        Err(err) => {
+            problems.push(format!("{err:#}"));
+            ShellKind::of(Path::new(&shell))
+        }
+    };
+    if let Some(m) = shell_mismatch(b, Os::current(), runs_in) {
+        warnings.push(m.message(true));
     }
     for s in b.effective_steps() {
         if let Some(c) = s.cwd.as_deref().filter(|c| !c.contains("{{")) {
@@ -142,6 +153,69 @@ pub fn check_entry(e: &Entry, base: &EnvMap, settings: &Settings, default_cwd: &
         problems,
         warnings,
     }
+}
+
+/// A step written for another shell than the one that runs it on some OS, e.g. `export A=1`
+/// where PowerShell runs it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellMismatch {
+    pub os: Os,
+    pub step: String,
+    pub written: ShellKind,
+    pub runs_in: ShellKind,
+}
+
+impl ShellMismatch {
+    /// `here`: said on that OS itself, so no need to name it.
+    pub fn message(&self, here: bool) -> String {
+        let place = if here { "here".to_string() } else { format!("on {}", self.os.label()) };
+        let fix = if self.os == Os::Windows && self.written == ShellKind::Posix {
+            "add a Windows command, or set shell = \"bash\" (Git Bash)".to_string()
+        } else {
+            format!("add a {} command", self.os.label())
+        };
+        format!(
+            "`{}` looks like {} syntax, but it runs in {} {place}; {fix}",
+            self.step,
+            self.written.label(),
+            self.runs_in.label()
+        )
+    }
+}
+
+/// The shell that runs `b`'s steps on `os`: the bookmark's own choice; on this OS, the
+/// settings or the default; elsewhere, that OS's usual default.
+pub fn shell_name_on(b: &Bookmark, os: Os, settings: &Settings, base: &EnvMap) -> String {
+    match b.shell_on(os) {
+        Some(s) => s.to_string(),
+        None if os == Os::current() => settings.shell.clone().unwrap_or_else(|| plan::default_shell(base)),
+        None if os == Os::Windows => "powershell".into(),
+        None => "sh".into(),
+    }
+}
+
+/// The first step that's unmistakably written for another shell than `runs_in` on `os`.
+pub fn shell_mismatch(b: &Bookmark, os: Os, runs_in: ShellKind) -> Option<ShellMismatch> {
+    if b.is_remote() || runs_in == ShellKind::Fish {
+        return None;
+    }
+    b.steps_on(os).iter().find_map(|s| {
+        let written = shell::written_for(&s.run)?;
+        let line = s.run.lines().next().unwrap_or_default().trim();
+        let step = if line.chars().count() > 48 {
+            format!("{}…", line.chars().take(47).collect::<String>())
+        } else {
+            line.into()
+        };
+        (written != runs_in).then_some(ShellMismatch { os, step, written, runs_in })
+    })
+}
+
+/// Mismatches on each of `oses` (the editor checks every OS among your synced devices).
+pub fn shell_mismatches(b: &Bookmark, settings: &Settings, base: &EnvMap, oses: &[Os]) -> Vec<ShellMismatch> {
+    oses.iter()
+        .filter_map(|&os| shell_mismatch(b, os, ShellKind::of(Path::new(&shell_name_on(b, os, settings, base)))))
+        .collect()
 }
 
 pub fn check_library(lib: &Library, base: &EnvMap, default_cwd: &Path, paths: &crate::Paths) -> Report {
@@ -200,5 +274,29 @@ mod tests {
         );
         let c = check_entry(&bad, &base, &Settings::default(), d.path());
         assert_eq!(c.problems.len(), 3, "{:?}", c.problems);
+    }
+
+    #[test]
+    fn shell_language_mismatches() {
+        let b = Bookmark { command: Some("export A=1 && make".into()), ..Default::default() };
+        let base = EnvMap::new();
+        // Classified by the shell's name, even where it isn't installed.
+        let m = shell_mismatch(&b, Os::current(), ShellKind::Pwsh).unwrap();
+        assert!(m.message(true).contains("runs in PowerShell here"), "{}", m.message(true));
+        assert!(shell_mismatch(&b, Os::current(), ShellKind::Posix).is_none());
+
+        // A Mac user learns the bookmark won't run on their Windows PC, until it has a Windows command.
+        let on_windows = shell_mismatches(&b, &Settings::default(), &base, &[Os::Windows, Os::Linux]);
+        assert_eq!(on_windows.len(), 1);
+        assert!(
+            on_windows[0].message(false).contains("on Windows; add a Windows command"),
+            "{}",
+            on_windows[0].message(false)
+        );
+        let fixed = Bookmark {
+            windows: Some(crate::model::OsVariant { command: Some("$env:A = 1; make".into()), ..Default::default() }),
+            ..b.clone()
+        };
+        assert!(shell_mismatches(&fixed, &Settings::default(), &base, &[Os::Windows, Os::Linux]).is_empty());
     }
 }

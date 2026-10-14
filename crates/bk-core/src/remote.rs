@@ -107,6 +107,7 @@ impl RemotePlan {
             env_description: self.env_description.clone(),
             env_changes: self.notes.clone(),
             steps: self.steps.clone(),
+            notes: Vec::new(),
         }
     }
 

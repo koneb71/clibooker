@@ -2,9 +2,11 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::env::{self, EnvMap};
@@ -33,6 +35,16 @@ fn program_name(path: &Path) -> String {
 }
 
 impl ShellKind {
+    /// How the shell's language is called in messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            ShellKind::Posix => "POSIX shell (bash/zsh)",
+            ShellKind::Fish => "fish",
+            ShellKind::Pwsh => "PowerShell",
+            ShellKind::Cmd => "cmd",
+        }
+    }
+
     pub fn of(path: &Path) -> ShellKind {
         let stem = program_name(path);
         match stem.as_str() {
@@ -167,8 +179,57 @@ pub fn default_shell(env: &EnvMap) -> String {
     }
 }
 
-/// Resolve a shell name or path and the flags that make it skip rc files.
-pub fn resolve(name: &str, env: &EnvMap) -> Result<(PathBuf, Vec<String>)> {
+/// A shell found to run steps, with the flags that make it skip rc files.
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub path: PathBuf,
+    pub args: Vec<String>,
+    /// The shell asked for, when another one stands in because it isn't installed here.
+    pub instead_of: Option<String>,
+}
+
+impl Found {
+    /// "zsh isn't installed here; bash runs these steps".
+    pub fn note(&self) -> Option<String> {
+        let asked = self.instead_of.as_deref()?;
+        Some(format!(
+            "{} isn't installed here; {} runs these steps",
+            program_name(Path::new(asked)),
+            program_name(&self.path)
+        ))
+    }
+}
+
+/// Shells that can run each other's commands when one is missing: a bookmark saved with
+/// zsh on a Mac still runs in Git Bash on Windows, and `powershell` means `pwsh` off Windows.
+fn stand_ins(program: &str) -> &'static [&'static str] {
+    match program {
+        "sh" | "zsh" | "dash" | "ksh" | "mksh" | "bash" if cfg!(windows) => &["bash"],
+        "sh" | "zsh" | "dash" | "ksh" | "mksh" | "bash" => &["bash", "sh"],
+        "powershell" => &["pwsh"],
+        "pwsh" if cfg!(windows) => &["powershell"],
+        _ => &[],
+    }
+}
+
+/// Resolve a shell name or path, falling back to a stand-in from the same family.
+pub fn resolve(name: &str, env: &EnvMap) -> Result<Found> {
+    let err = match locate(name, env) {
+        Ok(path) => return Ok(Found { args: flags(&path), path, instead_of: None }),
+        Err(err) => err,
+    };
+    let program = program_name(Path::new(name));
+    let family = stand_ins(&program);
+    match family.iter().filter(|s| **s != program).find_map(|s| find(s, env)) {
+        Some(path) => Ok(Found { args: flags(&path), path, instead_of: Some(name.to_string()) }),
+        None if cfg!(windows) && family.first() == Some(&"bash") => {
+            bail!("{err}; install Git for Windows for bash, or give this bookmark a Windows command")
+        }
+        None => Err(err),
+    }
+}
+
+fn locate(name: &str, env: &EnvMap) -> Result<PathBuf> {
     let is_path = name.contains('/') || name.contains('\\') || name.starts_with('~');
     let path = if is_path {
         paths::expand_tilde(name)
@@ -178,8 +239,37 @@ pub fn resolve(name: &str, env: &EnvMap) -> Result<(PathBuf, Vec<String>)> {
     if !path.exists() {
         bail!("shell {} not found", path.display());
     }
-    let args = flags(&path);
-    Ok((path, args))
+    Ok(path)
+}
+
+static LOOKS_PWSH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\$env:[a-z_]|(^|[;|{]\s*)(Set-Location|Remove-Item|Get-ChildItem|Write-Host|Write-Output|New-Item|Copy-Item|Move-Item|Get-Content|Set-Content|Invoke-WebRequest|Start-Process|Select-Object|Where-Object|ForEach-Object)\b",
+    )
+    .expect("valid regex")
+});
+static LOOKS_CMD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)%[a-z_]\w{2,}%|(^|&&?\s*)set\s+[a-z_]\w*=").expect("valid regex"));
+static LOOKS_POSIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(^|&&|\|\||;)\s*(export\s+[A-Za-z_]\w*=|source\s+\S|rm\s+-[a-zA-Z]*(rf|fr))|^\s*[A-Za-z_]\w*=\S*\s+\S|/dev/null",
+    )
+    .expect("valid regex")
+});
+
+/// The shell language a command is unmistakably written in, if any: `$env:X` is
+/// PowerShell, `%PATH%` is cmd, `export X=1` or `rm -rf` is POSIX. Most commands
+/// (`python train.py`, `npm run dev`) run anywhere and give `None`.
+pub fn written_for(command: &str) -> Option<ShellKind> {
+    if LOOKS_PWSH.is_match(command) {
+        Some(ShellKind::Pwsh)
+    } else if LOOKS_CMD.is_match(command) {
+        Some(ShellKind::Cmd)
+    } else if LOOKS_POSIX.is_match(command) {
+        Some(ShellKind::Posix)
+    } else {
+        None
+    }
 }
 
 fn find(name: &str, env: &EnvMap) -> Option<PathBuf> {
@@ -240,6 +330,42 @@ pub fn git_bash(env: &EnvMap) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_for_only_when_unmistakable() {
+        for c in
+            ["export A=1 && make", "FOO=1 python x.py", "source .venv/bin/activate", "rm -rf build", "ls 2>/dev/null"]
+        {
+            assert_eq!(written_for(c), Some(ShellKind::Posix), "{c}");
+        }
+        for c in ["$env:A = 1; make", "Remove-Item -Recurse build", "ls | Where-Object Length -gt 1"] {
+            assert_eq!(written_for(c), Some(ShellKind::Pwsh), "{c}");
+        }
+        assert_eq!(written_for("echo %USERPROFILE%"), Some(ShellKind::Cmd));
+        for c in [
+            "python train.py --epochs 20",
+            "npm run dev",
+            "docker run -e A=1 img",
+            "echo $HOME",
+            "date +%Y%m%d",
+            "git log --source x",
+            "rm -r build",
+            "make && ./run.sh",
+        ] {
+            assert_eq!(written_for(c), None, "{c}");
+        }
+    }
+
+    #[test]
+    fn missing_posix_shell_falls_back_to_bash() {
+        let env = env::current();
+        let found = resolve("/nonexistent/zsh", &env).unwrap();
+        assert_eq!(ShellKind::of(&found.path), ShellKind::Posix);
+        assert_eq!(found.instead_of.as_deref(), Some("/nonexistent/zsh"));
+        assert!(found.note().unwrap().starts_with("zsh isn't installed here"), "{:?}", found.note());
+        assert!(resolve("/nonexistent/fish", &env).is_err(), "fish has no stand-in");
+        assert!(resolve("nosuchshell", &env).is_err());
+    }
 
     #[test]
     fn kinds_and_flags() {

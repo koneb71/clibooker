@@ -29,6 +29,14 @@ pub struct Bookmark {
     /// Multi-step workflow, run in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+    /// What runs differently on one OS, e.g. `windows = { command = "Remove-Item -Recurse build" }`.
+    /// Commands are written in a shell's language, and shells differ by OS.
+    #[serde(default, skip_serializing_if = "no_variant")]
+    pub macos: Option<OsVariant>,
+    #[serde(default, skip_serializing_if = "no_variant")]
+    pub linux: Option<OsVariant>,
+    #[serde(default, skip_serializing_if = "no_variant")]
+    pub windows: Option<OsVariant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// `.env` file, relative to `cwd`.
@@ -64,24 +72,91 @@ impl Bookmark {
         self.server.as_deref().is_some_and(|s| !s.trim().is_empty())
     }
 
-    /// The steps to run, treating `command` as a one-step workflow.
+    /// The steps that run on this OS, treating `command` as a one-step workflow.
     pub fn effective_steps(&self) -> Vec<Step> {
-        match &self.command {
-            Some(cmd) if self.steps.is_empty() => vec![Step::new(cmd.clone())],
-            _ => self.steps.clone(),
+        self.steps_on(Os::current())
+    }
+
+    /// The shell named for this OS's steps (`None`: the default shell).
+    pub fn effective_shell(&self) -> Option<&str> {
+        self.shell_on(Os::current())
+    }
+
+    /// The steps that run on `os`: its variant's, if it has any, else the base ones.
+    pub fn steps_on(&self, os: Os) -> Vec<Step> {
+        match self.variant(os) {
+            Some(v) if v.replaces_steps() => as_steps(&v.command, &v.steps),
+            _ => self.base_steps(),
         }
     }
 
+    /// The shell named for `os`. A variant with its own command doesn't inherit the base
+    /// shell, which was picked for the base command.
+    pub fn shell_on(&self, os: Os) -> Option<&str> {
+        match self.variant(os) {
+            Some(v) if v.shell.is_some() => v.shell.as_deref(),
+            Some(v) if v.replaces_steps() => None,
+            _ => self.shell.as_deref(),
+        }
+    }
+
+    /// The command or steps that run on every OS without a variant of its own.
+    pub fn base_steps(&self) -> Vec<Step> {
+        as_steps(&self.command, &self.steps)
+    }
+
+    /// `os`'s variant, if it says anything. Server bookmarks run on the server's OS, so
+    /// they never use one.
+    pub fn variant(&self, os: Os) -> Option<&OsVariant> {
+        if self.is_remote() {
+            return None;
+        }
+        self.variant_slot(os).as_ref().filter(|v| !v.is_empty())
+    }
+
+    pub fn variant_slot(&self, os: Os) -> &Option<OsVariant> {
+        match os {
+            Os::Macos => &self.macos,
+            Os::Linux => &self.linux,
+            Os::Windows => &self.windows,
+        }
+    }
+
+    pub fn variant_slot_mut(&mut self, os: Os) -> &mut Option<OsVariant> {
+        match os {
+            Os::Macos => &mut self.macos,
+            Os::Linux => &mut self.linux,
+            Os::Windows => &mut self.windows,
+        }
+    }
+
+    /// Checks what's written, the same on every OS (a bookmark synced from a Mac must be
+    /// storable on Windows too).
     pub fn validate(&self) -> Result<(), String> {
         if self.command.is_some() && !self.steps.is_empty() {
             return Err("use either `command` or `steps`, not both".into());
         }
-        let steps = self.effective_steps();
+        let steps = self.base_steps();
         if steps.is_empty() {
             return Err("bookmark has no `command` or `steps`".into());
         }
         if steps.iter().any(|s| s.run.trim().is_empty()) {
             return Err("a step has an empty command".into());
+        }
+        for os in Os::ALL {
+            let Some(v) = self.variant_slot(os).as_ref().filter(|v| !v.is_empty()) else { continue };
+            if self.is_remote() {
+                return Err(format!(
+                    "`{}` doesn't apply to bookmarks that run on a server (they use the server's shell)",
+                    os.key()
+                ));
+            }
+            if v.command.is_some() && !v.steps.is_empty() {
+                return Err(format!("{}: use either `command` or `steps`, not both", os.key()));
+            }
+            if as_steps(&v.command, &v.steps).iter().any(|s| s.run.trim().is_empty()) {
+                return Err(format!("{}: a step has an empty command", os.key()));
+            }
         }
         if !self.is_remote() && (!self.forward.is_empty() || self.detach) {
             return Err("`forward` and `detach` only apply to bookmarks that run on a server".into());
@@ -132,6 +207,84 @@ impl Bookmark {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn as_steps(command: &Option<String>, steps: &[Step]) -> Vec<Step> {
+    match command {
+        Some(cmd) if steps.is_empty() => vec![Step::new(cmd.clone())],
+        _ => steps.to_vec(),
+    }
+}
+
+fn no_variant(v: &Option<OsVariant>) -> bool {
+    v.as_ref().is_none_or(OsVariant::is_empty)
+}
+
+/// An operating system a bookmark can say something different for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Os {
+    Macos,
+    Linux,
+    Windows,
+}
+
+impl Os {
+    pub const ALL: [Os; 3] = [Os::Macos, Os::Linux, Os::Windows];
+
+    /// The OS this runs on (other Unixes count as Linux).
+    pub fn current() -> Os {
+        if cfg!(target_os = "macos") {
+            Os::Macos
+        } else if cfg!(windows) {
+            Os::Windows
+        } else {
+            Os::Linux
+        }
+    }
+
+    /// The bookmark key, which is also `std::env::consts::OS`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Os::Macos => "macos",
+            Os::Linux => "linux",
+            Os::Windows => "windows",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Os::Macos => "macOS",
+            Os::Linux => "Linux",
+            Os::Windows => "Windows",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Os> {
+        Os::ALL.into_iter().find(|o| o.key() == s)
+    }
+}
+
+/// What runs differently on one OS: the command (or steps) and the shell they're written for.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsVariant {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Step>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
+impl OsVariant {
+    pub fn is_empty(&self) -> bool {
+        !self.replaces_steps() && self.shell.is_none()
+    }
+
+    pub fn replaces_steps(&self) -> bool {
+        self.command.is_some() || !self.steps.is_empty()
+    }
 }
 
 /// One step of a workflow. Serialized as a plain string when only `run` is set.
@@ -452,5 +605,48 @@ steps = ["alembic upgrade head", { run = "npm run dev", cwd = "frontend", contin
     fn validate_rejects_both() {
         let b = Bookmark { command: Some("a".into()), steps: vec![Step::new("b")], ..Default::default() };
         assert!(b.validate().is_err());
+    }
+
+    fn variant(command: Option<&str>, shell: Option<&str>) -> Option<OsVariant> {
+        Some(OsVariant { command: command.map(Into::into), shell: shell.map(Into::into), ..Default::default() })
+    }
+
+    #[test]
+    fn os_variants_pick_steps_and_shell() {
+        let b = Bookmark {
+            command: Some("rm -rf build".into()),
+            shell: Some("zsh".into()),
+            windows: variant(Some("Remove-Item -Recurse build"), None),
+            linux: variant(None, Some("bash")),
+            ..Default::default()
+        };
+        assert_eq!(b.steps_on(Os::Windows)[0].run, "Remove-Item -Recurse build");
+        assert_eq!(b.shell_on(Os::Windows), None, "a variant's own command doesn't inherit the base shell");
+        assert_eq!(b.steps_on(Os::Linux)[0].run, "rm -rf build");
+        assert_eq!(b.shell_on(Os::Linux), Some("bash"), "a shell-only variant changes just the shell");
+        assert_eq!(b.steps_on(Os::Macos)[0].run, "rm -rf build");
+        assert_eq!(b.shell_on(Os::Macos), Some("zsh"));
+        assert_eq!(b.effective_steps(), b.steps_on(Os::current()));
+        assert_eq!(b.summary(), b.steps_on(Os::current())[0].run);
+        assert!(b.validate().is_ok());
+
+        // Server bookmarks run in the server's shell: variants don't apply, and aren't accepted.
+        let remote = Bookmark { server: Some("gpu".into()), ..b.clone() };
+        assert_eq!(remote.steps_on(Os::Windows)[0].run, "rm -rf build");
+        assert!(remote.validate().unwrap_err().contains("server"));
+    }
+
+    #[test]
+    fn validation_is_the_same_on_every_os() {
+        let only_windows = Bookmark { windows: variant(Some("dir"), None), ..Default::default() };
+        assert!(only_windows.validate().unwrap_err().contains("no `command`"), "the base command is required");
+        let both = Bookmark {
+            command: Some("ls".into()),
+            windows: Some(OsVariant { command: Some("dir".into()), steps: vec![Step::new("x")], ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(both.validate().unwrap_err().starts_with("windows:"));
+        let empty = Bookmark { command: Some("ls".into()), macos: variant(Some(" "), None), ..Default::default() };
+        assert!(empty.validate().unwrap_err().starts_with("macos:"));
     }
 }

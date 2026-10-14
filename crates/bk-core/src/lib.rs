@@ -21,6 +21,6 @@ pub mod sync;
 pub mod template;
 pub mod trust;
 
-pub use model::{Bookmark, EnvSpec, Server, Settings, Step};
+pub use model::{Bookmark, EnvSpec, Os, OsVariant, Server, Settings, Step};
 pub use paths::Paths;
 pub use store::{Entry, Library, Scope};

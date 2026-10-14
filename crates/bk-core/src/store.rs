@@ -305,6 +305,9 @@ const FIELD_ORDER: &[&str] = &[
     "path",
     "command",
     "steps",
+    "macos",
+    "linux",
+    "windows",
     "forward",
     "detach",
     "dotenv",
@@ -399,7 +402,7 @@ pub fn touch(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EnvSpec, Step};
+    use crate::model::{EnvSpec, OsVariant, Step};
 
     #[test]
     fn hiding_servers_keeps_the_rest_of_settings() {
@@ -465,6 +468,40 @@ mod tests {
         assert!(!out.contains("[bookmarks]\n"), "implicit parent table: {out}");
         assert!(!out.contains("[[bookmarks.wf.steps]]"), "{out}");
         assert_eq!(read_file(&f).unwrap().bookmarks["wf"], b);
+    }
+
+    #[test]
+    fn os_variants_round_trip_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.toml");
+        let b = Bookmark {
+            command: Some("rm -rf build && make".into()),
+            windows: Some(OsVariant {
+                steps: vec![
+                    Step::new("Remove-Item -Recurse build\nmake"),
+                    Step { run: "x".into(), cwd: Some("web".into()), ..Default::default() },
+                ],
+                ..Default::default()
+            }),
+            macos: Some(OsVariant { shell: Some("zsh".into()), ..Default::default() }),
+            linux: Some(OsVariant::default()),
+            ..Default::default()
+        };
+        upsert(&f, "clean", &b).unwrap();
+        let out = fs::read_to_string(&f).unwrap();
+        assert!(out.contains("windows = { steps = ["), "{out}");
+        assert!(out.contains("macos = { shell = \"zsh\" }"), "{out}");
+        assert!(!out.contains("linux"), "an empty variant isn't written: {out}");
+        assert!(out.find("command").unwrap() < out.find("macos").unwrap(), "{out}");
+        let back = read_file(&f).unwrap().bookmarks.remove("clean").unwrap();
+        assert_eq!(back.windows, b.windows);
+        assert_eq!(back.macos, b.macos);
+
+        // Written by hand as a sub-table, with a typo caught.
+        let parsed = parse_str("[bookmarks.x]\ncommand = \"ls\"\n[bookmarks.x.windows]\ncommand = \"dir\"\n").unwrap();
+        assert_eq!(parsed.bookmarks["x"].windows.as_ref().unwrap().command.as_deref(), Some("dir"));
+        let err = parse_str("[bookmarks.x]\ncommand = \"ls\"\nwindows = { cwd = \"C:/x\" }\n").unwrap_err();
+        assert!(format!("{err:#}").contains("cwd"), "{err:#}");
     }
 
     #[test]

@@ -82,7 +82,7 @@ pub fn stored_dir(abs: &Path, project_dir: Option<&Path>) -> String {
     if let Some(pd) = project_dir
         && let Ok(rest) = abs.strip_prefix(pd)
     {
-        return if rest.as_os_str().is_empty() { ".".into() } else { rest.display().to_string() };
+        return if rest.as_os_str().is_empty() { ".".into() } else { paths::portable(rest) };
     }
     paths::contract_tilde(abs)
 }
@@ -190,6 +190,9 @@ pub fn add(ctx: &Ctx, a: AddArgs) -> Result<i32> {
             path: a.path,
             command,
             steps,
+            macos: None,
+            linux: None,
+            windows: None,
             tags: a.tags,
             dotenv: a.dotenv,
             vars: a.vars.iter().map(|v| parse_kv(v)).collect::<Result<BTreeMap<_, _>>>()?,
@@ -228,6 +231,9 @@ pub fn add(ctx: &Ctx, a: AddArgs) -> Result<i32> {
         path: a.path,
         command,
         steps,
+        macos: None,
+        linux: None,
+        windows: None,
         tags: a.tags,
         dotenv: a.dotenv,
         vars,
