@@ -549,6 +549,16 @@ impl RunManager {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let (clean, markers) = parser.feed(&buf[..n]);
+                        // Under ConPTY, programs may ask where the cursor is (ESC[6n) and wait
+                        // for the terminal's answer. xterm.js answers while a view is attached;
+                        // for a run nobody is watching (e.g. started in the background), answer
+                        // for it so it doesn't hang.
+                        #[cfg(windows)]
+                        if clean.windows(4).any(|w| w == b"\x1b[6n")
+                            && reader_run.output.lock().expect("output lock").subs.is_empty()
+                        {
+                            reader_run.write_input(b"\x1b[1;1R");
+                        }
                         reader_run.output.lock().expect("output lock").push(&clean);
                         for m in markers {
                             handle_marker(&reader_run, &reader_app, &labels, &m);
@@ -1007,24 +1017,14 @@ mod runner_e2e {
             .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("bk-")))
     }
 
-    /// Waits for a run to end, standing in for xterm.js: programs under ConPTY may ask the
-    /// terminal for the cursor position (`ESC[6n`) and wait for the answer.
+    /// Waits for a run to end. No terminal view is attached, like a run started in the
+    /// background, so on Windows this also checks that cursor queries get answered for it.
     fn wait_done(mgr: &RunManager, id: &str, secs: u64) -> RunInfo {
         let start = Instant::now();
-        let mut answered = 0;
         loop {
             let info = mgr.list().into_iter().find(|r| r.id == id).unwrap();
             if info.status != Status::Running {
                 return info;
-            }
-            let asked = {
-                let run = mgr.get(id).unwrap();
-                let out = run.output.lock().unwrap();
-                out.buf.windows(4).filter(|w| w == b"\x1b[6n").count()
-            };
-            while answered < asked {
-                let _ = mgr.write(id, b"\x1b[1;1R");
-                answered += 1;
             }
             if start.elapsed() > Duration::from_secs(secs) {
                 let out = String::from_utf8_lossy(&mgr.get(id).unwrap().output.lock().unwrap().buf).into_owned();
