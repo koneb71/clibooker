@@ -1007,32 +1007,94 @@ mod runner_e2e {
             .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("bk-")))
     }
 
+    /// Waits for a run to end, standing in for xterm.js: programs under ConPTY may ask the
+    /// terminal for the cursor position (`ESC[6n`) and wait for the answer.
     fn wait_done(mgr: &RunManager, id: &str, secs: u64) -> RunInfo {
         let start = Instant::now();
+        let mut answered = 0;
         loop {
             let info = mgr.list().into_iter().find(|r| r.id == id).unwrap();
             if info.status != Status::Running {
                 return info;
             }
-            assert!(start.elapsed() < Duration::from_secs(secs), "run still going after {secs}s");
+            let asked = {
+                let run = mgr.get(id).unwrap();
+                let out = run.output.lock().unwrap();
+                out.buf.windows(4).filter(|w| w == b"\x1b[6n").count()
+            };
+            while answered < asked {
+                let _ = mgr.write(id, b"\x1b[1;1R");
+                answered += 1;
+            }
+            if start.elapsed() > Duration::from_secs(secs) {
+                let out = String::from_utf8_lossy(&mgr.get(id).unwrap().output.lock().unwrap().buf).into_owned();
+                panic!("run still going after {secs}s: {info:?}\noutput:\n{out}");
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    fn start(mgr: &RunManager, steps: Vec<Step>) -> (RunInfo, PathBuf) {
-        let d = tempfile::tempdir().unwrap().keep();
+    fn plan_for(dir: &std::path::Path, steps: Vec<Step>) -> RunPlan {
         let b = Bookmark {
             cwd: Some(".".into()),
             shell: Some(if cfg!(windows) { "powershell" } else { "sh" }.into()),
             steps,
             ..Default::default()
         };
-        let mut e = Entry::new("runner", Scope::Global, &d.join("b.toml"), b);
-        e.base_dir = d.clone();
-        let req = RunRequest { default_cwd: d.clone(), ..Default::default() };
-        let plan =
-            bk_core::plan::build(&e, &req, &bk_core::env::current(), &Settings::default(), bk_core::env::Mode::Run)
-                .unwrap();
+        let mut e = Entry::new("runner", Scope::Global, &dir.join("b.toml"), b);
+        e.base_dir = dir.to_path_buf();
+        let req = RunRequest { default_cwd: dir.to_path_buf(), ..Default::default() };
+        bk_core::plan::build(&e, &req, &bk_core::env::current(), &Settings::default(), bk_core::env::Mode::Run).unwrap()
+    }
+
+    /// The runner by itself, outside a pseudo-terminal: tells runner bugs from PTY ones.
+    #[test]
+    fn runner_without_a_terminal() {
+        let Some(bk) = sidecar() else { return };
+        let d = tempfile::tempdir().unwrap();
+        let echo = if cfg!(windows) { "Write-Output one-$((1+1))" } else { "echo one-$((1+1))" };
+        let plan = plan_for(d.path(), vec![Step::new(echo), Step::new("exit 3")]);
+        let progress = d.path().join("progress");
+        let steps = d.path().join("steps.json");
+        std::fs::write(&steps, serde_json::to_string(&plan.steps_file(Some(progress.clone()))).unwrap()).unwrap();
+        let mut child = std::process::Command::new(&bk)
+            .arg("__run")
+            .arg(&steps)
+            .env_clear()
+            .envs(&plan.env)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        let status = loop {
+            if let Some(st) = child.try_wait().unwrap() {
+                break st;
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                let _ = child.kill();
+                let out = child.wait_with_output().unwrap();
+                panic!(
+                    "bk __run still going after 30s\nstdout: {}\nstderr: {}\nprogress: {:?}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                    std::fs::read_to_string(&progress)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(status.code(), Some(3), "stdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains("one-2"), "{stdout}");
+        let p = std::fs::read_to_string(&progress).unwrap();
+        assert!(p.contains("step;2") && p.contains("done;3"), "{p}");
+    }
+
+    fn start(mgr: &RunManager, steps: Vec<Step>) -> (RunInfo, PathBuf) {
+        let d = tempfile::tempdir().unwrap().keep();
+        let plan = plan_for(&d, steps);
         let spawn = Spawn::local_runner(&plan);
         let progress = spawn.local_steps.as_ref().unwrap().progress_file.clone();
         let opts = StartOptions {
