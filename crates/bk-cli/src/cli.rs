@@ -129,6 +129,9 @@ pub enum Cmd {
     Sync {
         #[command(subcommand)]
         cmd: Option<SyncCmd>,
+        /// Quietly, unless another sync is under way (what automatic syncing runs)
+        #[arg(long, hide = true)]
+        background: bool,
     },
     /// Open the Clibooker desktop app
     App,
@@ -282,6 +285,17 @@ pub enum SyncCmd {
     Status,
     /// Stop syncing on this device (keeps the chat in Telegram)
     Forget,
+    /// Whether this device syncs by itself (on by default)
+    Auto {
+        #[arg(value_enum)]
+        state: Option<OnOff>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 #[derive(Debug, Args)]

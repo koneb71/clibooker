@@ -535,6 +535,9 @@ fn collect_params(e: &Entry, given: &[String], yes: bool) -> Result<BTreeMap<Str
 
 pub fn run(ctx: &Ctx, r: RunArgs) -> Result<i32> {
     let mut lib = ctx.library();
+    if lib.find(&r.name).is_none() && crate::sync_cmds::fetch_missing(ctx, &r.name) {
+        lib = ctx.library();
+    }
     if let Some(fresh) = crate::folders_cmds::ensure_here(ctx, &lib, ctx.find(&lib, &r.name)?)? {
         lib = fresh;
     }
@@ -581,6 +584,7 @@ pub fn run(ctx: &Ctx, r: RunArgs) -> Result<i32> {
     let outcome = exec::run(&plan)?;
     if lib.settings.history_enabled() {
         let mut rec = history::RunRecord::from_plan(&plan, "cli", started);
+        rec.device = Some(bk_core::sync::this_device(&ctx.paths));
         rec.duration_ms = (history::now_ms() - started).max(0) as u64;
         rec.exit_code = Some(outcome.code);
         if let Err(err) = history::append(&ctx.paths.history_file(), &rec) {

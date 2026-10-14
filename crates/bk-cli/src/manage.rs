@@ -164,9 +164,12 @@ pub fn history(ctx: &Ctx, name: Option<&str>, limit: usize, json: bool) -> Resul
         return Ok(0);
     }
     let now = history::now_ms();
+    let here = bk_core::sync::this_device(&ctx.paths);
     let width = console::Term::stdout().size_checked().map(|(_, w)| w as usize).unwrap_or(120);
     let name_w = records.iter().map(|r| r.name.len()).max().unwrap_or(4);
     for r in records {
+        // Runs from your other devices say where they ran.
+        let device = r.device.as_deref().filter(|d| *d != here).map(|d| format!(" @{d}")).unwrap_or_default();
         let mark = match r.exit_code {
             Some(0) => style("✓".to_string()).green(),
             Some(130) => style("■".to_string()).yellow(),
@@ -175,15 +178,16 @@ pub fn history(ctx: &Ctx, name: Option<&str>, limit: usize, json: bool) -> Resul
         };
         let ago = commands::human_secs((now - r.started_ms) / 1000);
         let dur = format!("{:.1}s", r.duration_ms as f64 / 1000.0);
-        let left = format!("{ago:>4} ago  {:<4} {:<name_w$}  {dur:>7}  ", "", r.name);
+        let left = format!("{ago:>4} ago  {:<4} {:<name_w$}  {dur:>7}  {device}", "", r.name);
         let cmd = r.commands.join(" && ");
         let cmd = console::truncate_str(&cmd, width.saturating_sub(console::measure_text_width(&left)).max(12), "…");
         println!(
-            "{}  {mark:<4} {}  {}  {}",
+            "{}  {mark:<4} {}  {}  {}{}",
             style(format!("{ago:>4} ago")).dim(),
             style(format!("{:<name_w$}", r.name)).bold(),
             style(format!("{dur:>7}")).dim(),
-            cmd
+            cmd,
+            style(device).magenta()
         );
     }
     Ok(0)

@@ -32,6 +32,9 @@ pub struct RunRecord {
     /// Server it ran on (remote runs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    /// The device it ran on (runs sync between devices). `None` in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 impl RunRecord {
@@ -49,6 +52,7 @@ impl RunRecord {
             commands: plan.steps.iter().filter(|s| !s.synthetic).map(|s| s.command.clone()).collect(),
             exit_code: None,
             server: None,
+            device: None,
         }
     }
 
@@ -66,6 +70,7 @@ impl RunRecord {
             commands: plan.steps.iter().filter(|s| !s.synthetic).map(|s| s.command.clone()).collect(),
             exit_code: None,
             server: Some(plan.target.name.clone()),
+            device: None,
         }
     }
 }
@@ -135,7 +140,16 @@ mod tests {
             commands: vec!["ls".into()],
             exit_code: Some(0),
             server: None,
+            device: None,
         }
+    }
+
+    #[test]
+    fn older_records_have_no_device() {
+        let old = r#"{"id":"1","started_ms":1,"duration_ms":0,"name":"a","entry_id":"g#a","source":"cli","cwd":"~","env":"inherit","commands":["ls"],"exit_code":0}"#;
+        let r: RunRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(r.device, None);
+        assert!(!serde_json::to_string(&r).unwrap().contains("device"), "nothing new is written for it");
     }
 
     #[test]

@@ -105,6 +105,7 @@ pub fn run(
     let outcome = exec::run_remote(&plan)?;
     if lib.settings.history_enabled() {
         let mut rec = history::RunRecord::from_remote(&plan, "cli", started);
+        rec.device = Some(bk_core::sync::this_device(&ctx.paths));
         rec.duration_ms = (history::now_ms() - started).max(0) as u64;
         rec.exit_code = Some(outcome.code);
         if let Err(err) = history::append(&ctx.paths.history_file(), &rec) {

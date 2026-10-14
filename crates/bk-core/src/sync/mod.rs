@@ -5,6 +5,10 @@
 //! `sync` downloads it, merges it with this device item by item (the newest change wins,
 //! deletions included), writes what changed here, and uploads a new snapshot if this device
 //! had anything newer.
+//!
+//! Syncing is automatic unless turned off on a device: [`pending`] says (without the network)
+//! whether this device has changes to send, and [`remote_head`] (one cheap call) whether
+//! another device sent some.
 
 pub mod crypto;
 #[cfg(any(test, feature = "fake-telegram"))]
@@ -59,11 +63,22 @@ pub struct SyncConfig {
     pub device: String,
     salt: String,
     key: String,
+    /// Sync by itself (after changes here, and when another device has sent some).
+    #[serde(default = "yes")]
+    pub auto: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl std::fmt::Debug for SyncConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SyncConfig").field("bot", &self.bot_username).field("device", &self.device).finish()
+        f.debug_struct("SyncConfig")
+            .field("bot", &self.bot_username)
+            .field("device", &self.device)
+            .field("auto", &self.auto)
+            .finish()
     }
 }
 
@@ -110,6 +125,14 @@ impl SyncConfig {
         Bot::new(&self.token)
     }
 
+    /// Turn automatic syncing on or off on this device.
+    pub fn set_auto(paths: &Paths, on: bool) -> Result<SyncConfig> {
+        let mut cfg = SyncConfig::load(paths).context("sync isn't set up on this device")?;
+        cfg.auto = on;
+        cfg.save(paths)?;
+        Ok(cfg)
+    }
+
     /// Stop syncing on this device: remove its config and state (the chat is left alone).
     pub fn forget(paths: &Paths) -> Result<()> {
         match fs::remove_dir_all(sync_dir(paths)) {
@@ -124,6 +147,11 @@ pub fn local_time(ms: i64) -> String {
     jiff::Timestamp::from_millisecond(ms)
         .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).strftime("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default()
+}
+
+/// This device's name: the one it syncs as, else its host name.
+pub fn this_device(paths: &Paths) -> String {
+    SyncConfig::load(paths).map(|c| c.device).unwrap_or_else(default_device_name)
 }
 
 pub fn default_device_name() -> String {
@@ -164,6 +192,7 @@ pub fn finish_setup(
         device: device.clone(),
         salt,
         key,
+        auto: true,
     };
     cfg.save(paths)?;
     // A fresh device starts with no sync state: everything here counts as changed now.
@@ -198,6 +227,20 @@ pub struct Snapshot {
     pub items: BTreeMap<String, Item>,
     #[serde(default)]
     pub history: Vec<RunRecord>,
+    /// Every device that syncs, as of its last upload.
+    #[serde(default)]
+    pub devices: BTreeMap<String, DeviceInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    /// `macos`, `linux` or `windows`.
+    pub os: String,
+    /// When it last sent changes.
+    pub last_change_ms: i64,
+    /// Its Clibooker version.
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -213,6 +256,9 @@ pub struct State {
     pub last_summary: Option<String>,
     #[serde(default)]
     items: BTreeMap<String, ItemState>,
+    /// The devices in the latest snapshot (for status displays without the network).
+    #[serde(default)]
+    pub devices: BTreeMap<String, DeviceInfo>,
 }
 
 impl State {
@@ -416,6 +462,36 @@ fn apply(
     Ok(changed)
 }
 
+/// How automatic syncing last went on this device (`sync/auto.json`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoState {
+    pub last_attempt_ms: Option<i64>,
+    /// Why the last attempt failed (cleared by a sync that works).
+    pub last_error: Option<String>,
+}
+
+impl AutoState {
+    pub fn load(paths: &Paths) -> AutoState {
+        fs::read_to_string(sync_dir(paths).join("auto.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Note an attempt (before it starts, so other processes don't start one too) or its outcome.
+    pub fn record(paths: &Paths, error: Option<String>) -> Result<()> {
+        let st = AutoState { last_attempt_ms: Some(now_ms()), last_error: error };
+        fs::create_dir_all(sync_dir(paths))?;
+        store::atomic_write(&sync_dir(paths).join("auto.json"), serde_json::to_string(&st)?.as_bytes())
+    }
+
+    /// The last automatic sync failed, and nothing has synced since.
+    pub fn failing(&self, state: &State) -> Option<&str> {
+        let after_last_sync = self.last_attempt_ms > state.last_sync_ms;
+        self.last_error.as_deref().filter(|_| after_last_sync)
+    }
+}
+
 fn run_key(r: &RunRecord) -> (String, i64) {
     (r.id.clone(), r.started_ms)
 }
@@ -445,12 +521,54 @@ pub fn remote_info(cfg: &SyncConfig) -> Result<Option<(String, i64)>> {
     Ok(Some((snap.device, snap.pushed_ms)))
 }
 
+/// The id of the snapshot pinned in the chat: when it isn't the one this device last saw,
+/// another device has sent changes. One `getChat` call, no download.
+pub fn remote_head(cfg: &SyncConfig) -> Result<Option<i64>> {
+    Ok(remote_message(&cfg.bot(), cfg.chat_id)?.map(|(id, _)| id))
+}
+
+/// What this device has to send, found without the network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Pending {
+    /// Bookmarks, servers and settings changed (or deleted) since the last sync.
+    pub items: usize,
+    /// Runs recorded since the last sync.
+    pub new_runs: bool,
+}
+
+pub fn pending(paths: &Paths) -> Result<Pending> {
+    let state = State::load(paths);
+    let values = local_values(paths)?;
+    let changed = values.iter().filter(|(k, v)| state.items.get(*k).is_none_or(|s| s.hash != hash(v))).count();
+    let deleted = state.items.iter().filter(|(k, s)| s.hash != GONE && is_mine(k) && !values.contains_key(*k)).count();
+    let history = paths.history_file();
+    let new_runs = history.exists() && state.last_sync_ms.is_none_or(|t| modified_ms(&history) > t);
+    Ok(Pending { items: changed + deleted, new_runs })
+}
+
+fn lock_file(paths: &Paths) -> Result<fs::File> {
+    fs::create_dir_all(sync_dir(paths))?;
+    Ok(fs::OpenOptions::new().create(true).truncate(false).write(true).open(sync_dir(paths).join("lock"))?)
+}
+
 /// One sync: download, merge, write here, upload if this device had anything newer.
 pub fn sync(paths: &Paths, cfg: &SyncConfig) -> Result<Summary> {
-    fs::create_dir_all(sync_dir(paths))?;
-    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(sync_dir(paths).join("lock"))?;
+    let lock = lock_file(paths)?;
     lock.lock().context("waiting for another sync on this device")?;
+    sync_locked(paths, cfg)
+}
 
+/// Sync unless another sync on this device is under way (then `None`): for background syncs.
+pub fn sync_if_idle(paths: &Paths, cfg: &SyncConfig) -> Result<Option<Summary>> {
+    let lock = lock_file(paths)?;
+    match lock.try_lock() {
+        Ok(()) => sync_locked(paths, cfg).map(Some),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+fn sync_locked(paths: &Paths, cfg: &SyncConfig) -> Result<Summary> {
     let bot = cfg.bot();
     let key = cfg.key()?;
     let mut state = State::load(paths);
@@ -514,8 +632,13 @@ pub fn sync(paths: &Paths, cfg: &SyncConfig) -> Result<Summary> {
     all_runs.truncate(HISTORY_CAP);
     let new_runs = all_runs.iter().any(|r| !remote_keys.contains(&run_key(r)));
 
-    // Upload when this device had anything the snapshot lacks.
-    if remote.is_none() || summary.sent > 0 || new_runs {
+    // Upload when this device had anything the snapshot lacks (itself included, as a device).
+    let mut devices = remote_snap.devices.clone();
+    if remote.is_none() || summary.sent > 0 || new_runs || !devices.contains_key(&cfg.device) {
+        devices.insert(
+            cfg.device.clone(),
+            DeviceInfo { os: os().to_string(), last_change_ms: now_ms(), version: env!("CARGO_PKG_VERSION").into() },
+        );
         let snap = Snapshot {
             format: FORMAT,
             device: cfg.device.clone(),
@@ -524,6 +647,7 @@ pub fn sync(paths: &Paths, cfg: &SyncConfig) -> Result<Summary> {
             global_file: here.clone(),
             items: merged.clone(),
             history: all_runs,
+            devices: devices.clone(),
         };
         let sealed = crypto::encrypt(&key, &serde_json::to_vec(&snap)?)?;
         let time = jiff::Timestamp::now().strftime("%Y-%m-%d %H:%M UTC").to_string();
@@ -556,6 +680,7 @@ pub fn sync(paths: &Paths, cfg: &SyncConfig) -> Result<Summary> {
         .collect();
     state.last_sync_ms = Some(now_ms());
     state.last_summary = Some(summary.line());
+    state.devices = devices;
     state.save(paths)?;
     Ok(summary)
 }
@@ -649,6 +774,7 @@ mod tests {
             commands: vec!["echo".into()],
             exit_code: Some(0),
             server: None,
+            device: None,
         }
     }
 
@@ -674,8 +800,12 @@ mod tests {
         let contact = bot.wait_for_contact(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(contact.chat_id, fake::CHAT_ID);
         let ca = finish_setup(&a, fake::TOKEN, "clibooker_test_bot", &contact, "correct horse", "A").unwrap();
+        assert!(ca.auto, "syncs by itself unless turned off");
+        assert!(pending(&a).unwrap().items > 0 && pending(&a).unwrap().new_runs, "never synced: everything is pending");
         let s = sync(&a, &ca).unwrap();
         assert!(s.uploaded && s.received == 0, "{s:?}");
+        assert_eq!(pending(&a).unwrap(), Pending::default(), "a sync's own writes aren't changes");
+        assert_eq!(remote_head(&ca).unwrap(), State::load(&a).last_message_id);
         let blob = tg.pinned_bytes().unwrap();
         assert!(blob.starts_with(b"CLBSYNC1") && !blob.windows(7).any(|w| w == b"echo hi"), "stored encrypted");
 
@@ -693,9 +823,37 @@ mod tests {
         assert_eq!(history::read(&b.history_file(), 10, None).unwrap()[0].id, "r1");
         assert!(s.uploaded && s.from_device.as_deref() == Some("A"), "{s:?}");
         assert_eq!(tg.documents(), 1, "the older snapshot was retired");
+        assert_ne!(remote_head(&ca).unwrap(), State::load(&a).last_message_id, "A can tell B sent something");
         assert_eq!(sync(&a, &ca).unwrap().received, 1);
+        let devices = State::load(&a).devices;
+        assert_eq!(devices.keys().collect::<Vec<_>>(), ["A", "B"]);
+        assert_eq!(devices["B"].os, os());
         assert_eq!(command(&a, "other").as_deref(), Some("make"));
         assert_eq!(sync(&a, &ca).unwrap().line(), "already up to date");
+
+        // A busy device skips a background sync instead of waiting.
+        {
+            let held = lock_file(&a).unwrap();
+            held.lock().unwrap();
+            assert!(sync_if_idle(&a, &ca).unwrap().is_none());
+        }
+        assert!(sync_if_idle(&a, &ca).unwrap().is_some());
+
+        // Per-OS commands travel with the bookmark.
+        let clean = Bookmark {
+            command: Some("rm -rf build".into()),
+            windows: Some(crate::model::OsVariant {
+                command: Some("Remove-Item -Recurse build".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        store::upsert(&a.config_file, "clean", &clean).unwrap();
+        assert_eq!(pending(&a).unwrap().items, 1);
+        sync(&a, &ca).unwrap();
+        sync(&b, &cb).unwrap();
+        assert_eq!(store::read_file(&b.config_file).unwrap().bookmarks["clean"], clean);
 
         // Different bookmarks edited on each device: both edits survive.
         put(&a, "hello", "echo hello A");
@@ -731,6 +889,17 @@ mod tests {
         let ids: Vec<String> = history::read(&a.history_file(), 10, None).unwrap().into_iter().map(|r| r.id).collect();
         assert_eq!(ids, ["r2", "r1"]);
         assert!(tg.texts().iter().any(|t| t.contains("B is syncing")));
+    }
+
+    #[test]
+    fn older_configs_sync_automatically() {
+        let old = r#"{"token":"1:x","chat_id":1,"user_id":1,"bot_username":"b","device":"d","salt":"s","key":"k"}"#;
+        assert!(serde_json::from_str::<SyncConfig>(old).unwrap().auto);
+        let st = State { last_sync_ms: Some(10), ..Default::default() };
+        let failed = AutoState { last_attempt_ms: Some(20), last_error: Some("offline".into()) };
+        assert_eq!(failed.failing(&st), Some("offline"));
+        let since = State { last_sync_ms: Some(30), ..Default::default() };
+        assert_eq!(failed.failing(&since), None, "a sync since then worked");
     }
 
     #[test]
