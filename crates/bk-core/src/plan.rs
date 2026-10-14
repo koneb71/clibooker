@@ -12,6 +12,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::env::{self, Activated, EnvMap, Mode};
+use crate::folders::Located;
 use crate::model::Settings;
 use crate::paths;
 use crate::shell::{self, ShellKind};
@@ -135,7 +136,11 @@ pub fn build(entry: &Entry, req: &RunRequest, base: &EnvMap, settings: &Settings
         bail!("`{}` runs on a server; build it with remote::build", entry.name);
     }
 
-    let cwd = entry.cwd().unwrap_or_else(|| req.default_cwd.clone());
+    let folder = entry.folder();
+    if let Some(reason) = folder.as_ref().and_then(Located::missing_reason) {
+        bail!("`{}`'s folder {reason}", entry.name);
+    }
+    let cwd = folder.map(Located::into_path).unwrap_or_else(|| req.default_cwd.clone());
     if !cwd.is_dir() {
         bail!("working directory {} does not exist", cwd.display());
     }

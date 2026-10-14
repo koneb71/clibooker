@@ -225,7 +225,10 @@ fn go_dialect(ctx: &Ctx, shell: Option<GoShell>) -> Dialect {
 }
 
 pub fn go(ctx: &Ctx, name: &str, print: bool, shell: Option<GoShell>) -> Result<i32> {
-    let lib = ctx.library();
+    let mut lib = ctx.library();
+    if !print && let Some(fresh) = crate::folders_cmds::ensure_here(ctx, &lib, ctx.find(&lib, name)?)? {
+        lib = fresh;
+    }
     let e = ctx.find(&lib, name)?;
     let dialect = go_dialect(ctx, shell);
     if e.bookmark.is_remote() {

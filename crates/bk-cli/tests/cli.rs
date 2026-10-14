@@ -269,7 +269,7 @@ fn doctor_and_history() {
     std::fs::create_dir_all(&gone).unwrap();
     s.add(&["broken", "ls", "--cwd", "gone"]);
     std::fs::remove_dir(&gone).unwrap();
-    s.bk().arg("doctor").assert().code(1).stderr(contains("does not exist"));
+    s.bk().arg("doctor").assert().code(1).stderr(contains("doesn't exist on this device"));
 }
 
 #[test]
@@ -370,4 +370,87 @@ fn extra_path_entries() {
     std::process::Command::new("chmod").arg("+x").arg(bin.join("mytool")).status().unwrap();
     s.add(&["t", "--path", "tools", "mytool"]);
     s.bk().arg("t").assert().success().stdout("mytool ran\n");
+}
+
+impl Sandbox {
+    fn write_config(&self, toml: &str) {
+        std::fs::create_dir_all(self.config().parent().unwrap()).unwrap();
+        std::fs::write(self.config(), toml).unwrap();
+    }
+}
+
+/// Bookmarks synced from a Windows PC: their folders are found once, through a mapping on
+/// this device, and the bookmarks themselves stay as they are.
+#[test]
+fn folders_from_another_device() {
+    let s = Sandbox::new();
+    for d in ["dev/sam2", "dev/api"] {
+        std::fs::create_dir_all(s.path().join(d)).unwrap();
+    }
+    s.write_config(
+        "[bookmarks.train]\ncwd = 'D:\\work\\sam2'\ncommand = 'basename \"$PWD\"'\n\n\
+         [bookmarks.api]\ncwd = 'D:\\work\\api'\ncommand = 'basename \"$PWD\"'\n",
+    );
+    s.bk().arg("train").assert().failure().stderr(
+        contains("`train`'s folder D:\\work\\sam2 is a Windows path, not on this device")
+            .and(contains("bk locate train")),
+    );
+    s.bk().arg("doctor").assert().failure().stderr(contains("say where it is here: bk locate api"));
+    s.bk().arg("ls").assert().success().stdout(contains("D:\\work\\api (not here)"));
+
+    // Locating one bookmark maps the folder above it, which finds the other one too.
+    s.bk()
+        .args(["locate", "train", "dev/sam2"])
+        .assert()
+        .success()
+        .stderr(contains("D:/work →").and(contains("also found: api")));
+    s.bk().arg("train").assert().success().stdout("sam2\n");
+    s.bk().arg("api").assert().success().stdout("api\n");
+    s.bk().args(["show", "api"]).assert().success().stderr(contains("(D:/work →"));
+    s.bk().arg("folders").assert().success().stdout(contains("D:/work").and(contains("2 bookmarks")));
+    let written = std::fs::read_to_string(s.config()).unwrap();
+    assert!(written.contains("cwd = 'D:\\work\\api'"), "the bookmarks file is untouched: {written}");
+
+    // Any spelling of the same folder.
+    s.bk().args(["folders", "rm", "d:/WORK/"]).assert().success();
+    s.bk().arg("api").assert().failure();
+    s.bk().args(["folders", "add", "D:\\work", "dev"]).assert().success();
+    s.bk().arg("api").assert().success().stdout("api\n");
+    // One project moved: it gets a mapping of its own, and the others keep working.
+    std::fs::create_dir_all(s.path().join("moved/api")).unwrap();
+    s.bk().args(["locate", "api", "moved/api"]).assert().success().stderr(contains("D:/work/api →"));
+    s.bk().arg("api").assert().success().stdout(
+        "api
+",
+    );
+    s.bk().arg("train").assert().success().stdout(
+        "sam2
+",
+    );
+    s.bk().arg("folders").assert().success().stdout(contains("D:/work/api").and(contains(
+        "1 bookmark
+",
+    )));
+}
+
+#[test]
+fn per_os_commands_and_shell_stand_ins() {
+    let s = Sandbox::new();
+    let os = if cfg!(target_os = "macos") { "macos" } else { "linux" };
+    s.write_config(&format!(
+        "[bookmarks.hi]\ncommand = 'echo base'\n{os} = {{ command = 'echo on-{os}' }}\n\
+         windows = {{ command = 'Write-Output win' }}\n\n\
+         [bookmarks.z]\ncommand = 'echo ran'\nshell = '/nonexistent/zsh'\n"
+    ));
+    s.bk().arg("hi").assert().success().stdout(format!("on-{os}\n"));
+    s.bk().args(["show", "hi"]).assert().success().stderr(contains("windows").and(contains("Write-Output win")));
+    s.bk().args(["export", "hi"]).assert().success().stdout(contains("windows = { command = \"Write-Output win\" }"));
+    // A shell from another machine that isn't installed here: bash stands in.
+    s.bk()
+        .arg("z")
+        .assert()
+        .success()
+        .stdout("ran\n")
+        .stderr(contains("zsh isn't installed here; bash runs these steps"));
+    s.bk().arg("doctor").assert().stderr(contains("zsh isn't installed here"));
 }

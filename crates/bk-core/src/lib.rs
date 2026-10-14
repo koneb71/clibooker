@@ -2,6 +2,7 @@
 
 pub mod doctor;
 pub mod env;
+pub mod folders;
 pub mod history;
 pub mod model;
 pub mod paths;

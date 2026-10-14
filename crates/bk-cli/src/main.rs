@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod exec;
+mod folders_cmds;
 mod manage;
 mod remote_cmds;
 mod shellcmds;
@@ -49,6 +50,8 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<i32> {
         Some(Cmd::Edit { name, project }) => manage::edit(&ctx, name, project),
         Some(Cmd::History { name, limit, json }) => manage::history(&ctx, name.as_deref(), limit, json),
         Some(Cmd::Doctor) => manage::doctor(&ctx),
+        Some(Cmd::Locate { name, dir }) => folders_cmds::locate(&ctx, &name, dir),
+        Some(Cmd::Folders { cmd }) => folders_cmds::folders(&ctx, cmd),
         Some(Cmd::Trust { path, revoke }) => manage::trust_cmd(&ctx, path, revoke),
         Some(Cmd::Export { names, output, json }) => manage::export(&ctx, &names, output, json),
         Some(Cmd::Import { file, project, on_conflict }) => manage::import(&ctx, &file, project, on_conflict),

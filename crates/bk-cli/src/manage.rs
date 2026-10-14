@@ -260,6 +260,10 @@ pub fn doctor(ctx: &Ctx) -> Result<i32> {
         for p in &c.problems {
             eprintln!("    {}", style(p).red());
         }
+        if let Some(m) = &c.missing_folder {
+            let dir = m.suggestion.as_deref().unwrap_or("DIR");
+            eprintln!("    {}", style(format!("say where it is here: bk locate {} {dir}", c.name)).dim());
+        }
         for w in &c.warnings {
             eprintln!("    {}", style(w).yellow());
         }

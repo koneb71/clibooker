@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::env::{self, EnvMap, Mode};
+use crate::folders::{Located, Suggester};
 use crate::model::{Bookmark, Os, Settings};
 use crate::paths;
 use crate::plan;
@@ -19,6 +20,19 @@ pub struct Check {
     pub env: String,
     pub problems: Vec<String>,
     pub warnings: Vec<String>,
+    /// The bookmark's folder isn't on this device (so the app can offer to locate it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_folder: Option<MissingFolder>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MissingFolder {
+    /// As the bookmark names it.
+    pub written: String,
+    /// The OS the path was written on, when it's clearly another one.
+    pub foreign: Option<&'static str>,
+    /// A folder with the same name found on this device.
+    pub suggestion: Option<String>,
 }
 
 impl Check {
@@ -87,6 +101,7 @@ fn check_remote(
         env: b.env_summary(),
         problems,
         warnings,
+        missing_folder: None,
     }
 }
 
@@ -97,13 +112,19 @@ pub fn check_entry(e: &Entry, base: &EnvMap, settings: &Settings, default_cwd: &
     if let Err(msg) = b.validate() {
         problems.push(msg);
     }
-    let cwd = e.cwd();
-    let check_dir = cwd.clone().unwrap_or_else(|| default_cwd.to_path_buf());
-    if let Some(c) = &cwd
-        && !c.is_dir()
-    {
-        problems.push(format!("folder {} does not exist", paths::contract_tilde(c)));
+    let folder = e.folder();
+    let mut missing_folder = None;
+    match &folder {
+        Some(l @ Located::Missing { written, foreign, .. }) => {
+            problems.push(format!("folder {}", l.missing_reason().unwrap_or_default()));
+            missing_folder = Some(MissingFolder { written: written.clone(), foreign: *foreign, suggestion: None });
+        }
+        Some(l) if !l.path().is_dir() => {
+            problems.push(format!("folder {} does not exist", paths::contract_tilde(l.path())))
+        }
+        _ => {}
     }
+    let check_dir = folder.map(Located::into_path).unwrap_or_else(|| default_cwd.to_path_buf());
     if check_dir.is_dir()
         && let Err(err) = env::activate(&b.env, &check_dir, base, Mode::Check)
     {
@@ -152,6 +173,7 @@ pub fn check_entry(e: &Entry, base: &EnvMap, settings: &Settings, default_cwd: &
         env: b.env_summary(),
         problems,
         warnings,
+        missing_folder,
     }
 }
 
@@ -219,7 +241,7 @@ pub fn shell_mismatches(b: &Bookmark, settings: &Settings, base: &EnvMap, oses: 
 }
 
 pub fn check_library(lib: &Library, base: &EnvMap, default_cwd: &Path, paths: &crate::Paths) -> Report {
-    Report {
+    let mut report = Report {
         checks: lib
             .entries
             .iter()
@@ -233,7 +255,19 @@ pub fn check_library(lib: &Library, base: &EnvMap, default_cwd: &Path, paths: &c
             })
             .collect(),
         file_errors: lib.errors.iter().map(|e| e.message.clone()).collect(),
+    };
+    if report.checks.iter().any(|c| c.missing_folder.is_some()) {
+        let suggester = Suggester::new(lib, &project_dirs(paths));
+        for m in report.checks.iter_mut().filter_map(|c| c.missing_folder.as_mut()) {
+            m.suggestion = suggester.suggest(&m.written).first().map(|p| paths::contract_tilde(p));
+        }
     }
+    report
+}
+
+/// Folders of the projects this device knows about.
+pub fn project_dirs(paths: &crate::Paths) -> Vec<std::path::PathBuf> {
+    crate::projects::list(paths).iter().filter_map(|f| f.parent().map(Path::to_path_buf)).collect()
 }
 
 #[cfg(test)]
@@ -274,6 +308,28 @@ mod tests {
         );
         let c = check_entry(&bad, &base, &Settings::default(), d.path());
         assert_eq!(c.problems.len(), 3, "{:?}", c.problems);
+    }
+
+    #[test]
+    fn missing_folder_is_reported_with_a_suggestion() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = crate::Paths { config_file: d.path().join("b.toml"), data_dir: d.path().join("data") };
+        let work = d.path().join("work");
+        std::fs::create_dir_all(work.join("api")).unwrap();
+        std::fs::create_dir_all(work.join("sam2")).unwrap();
+        let bm = |cwd: &str| Bookmark { cwd: Some(cwd.into()), command: Some("ls".into()), ..Default::default() };
+        crate::store::upsert(&paths.config_file, "api", &bm(&work.join("api").display().to_string())).unwrap();
+        crate::store::upsert(&paths.config_file, "train", &bm(r"Z:\dev\sam2")).unwrap();
+        let lib = Library::load(&paths, &[]);
+        let base = crate::env::from_pairs([("PATH", std::env::join_paths(["/usr/bin", "/bin"]).unwrap())]);
+        let report = check_library(&lib, &base, d.path(), &paths);
+        let train = report.checks.iter().find(|c| c.name == "train").unwrap();
+        let m = train.missing_folder.as_ref().unwrap();
+        assert_eq!(m.written, r"Z:\dev\sam2");
+        // Found next to the folder of a bookmark that works here.
+        assert_eq!(m.suggestion.as_deref(), Some(paths::contract_tilde(&work.join("sam2")).as_str()));
+        assert!(train.problems[0].contains("on this device"), "{:?}", train.problems);
+        assert!(report.checks.iter().find(|c| c.name == "api").unwrap().missing_folder.is_none());
     }
 
     #[test]

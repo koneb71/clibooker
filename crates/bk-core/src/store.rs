@@ -3,11 +3,13 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use toml_edit::{Array, DocumentMut, Item, Table};
 
+use crate::folders::{FolderMap, Located};
 use crate::model::{BookFile, Bookmark, Server, Settings};
 use crate::paths::{self, Paths};
 
@@ -19,12 +21,14 @@ pub const RESERVED_NAMES: &[&str] = &[
     "doctor",
     "edit",
     "export",
+    "folders",
     "go",
     "help",
     "history",
     "import",
     "init",
     "list",
+    "locate",
     "ls",
     "mv",
     "pick",
@@ -73,6 +77,9 @@ pub struct Entry {
     /// Directory relative paths resolve against (project dir, or `~` for global).
     pub base_dir: PathBuf,
     pub bookmark: Bookmark,
+    /// Where folders from other devices are on this one.
+    #[serde(skip)]
+    pub folders: Arc<FolderMap>,
 }
 
 impl Entry {
@@ -88,14 +95,33 @@ impl Entry {
             file: file.to_path_buf(),
             base_dir,
             bookmark,
+            folders: Arc::default(),
         }
     }
 
-    /// Resolved working directory, or `None` when the bookmark doesn't pin one.
+    pub fn with_folders(mut self, folders: Arc<FolderMap>) -> Self {
+        self.folders = folders;
+        self
+    }
+
+    /// The working directory on this device, or `None` when the bookmark doesn't pin one.
+    /// A folder that isn't here still gives its path (see [`Entry::folder`]).
     pub fn cwd(&self) -> Option<PathBuf> {
+        if self.bookmark.is_remote() {
+            return self.bookmark.cwd.as_deref().map(|c| paths::resolve(c, &self.base_dir));
+        }
+        self.folder().map(Located::into_path)
+    }
+
+    /// Where the bookmark's folder is on this device: as written, through a folder mapping,
+    /// or missing. `None` for server bookmarks and ones that run wherever they're started.
+    pub fn folder(&self) -> Option<Located> {
+        if self.bookmark.is_remote() {
+            return None;
+        }
         match &self.bookmark.cwd {
-            Some(c) => Some(paths::resolve(c, &self.base_dir)),
-            None if self.scope == Scope::Project => Some(self.base_dir.clone()),
+            Some(c) => Some(self.folders.find_here(c, &self.base_dir)),
+            None if self.scope == Scope::Project => Some(Located::Here(self.base_dir.clone())),
             None => None,
         }
     }
@@ -115,11 +141,14 @@ pub struct Library {
     /// Project entries first (in the order given), then global.
     pub entries: Vec<Entry>,
     pub errors: Vec<LoadError>,
+    /// Where folders from other devices are on this one.
+    #[serde(skip)]
+    pub folders: Arc<FolderMap>,
 }
 
 impl Library {
     pub fn load(paths: &Paths, project_files: &[PathBuf]) -> Library {
-        let mut lib = Library::default();
+        let mut lib = Library { folders: Arc::new(FolderMap::load(paths)), ..Library::default() };
         for pf in project_files {
             match read_file(pf) {
                 Ok(f) => lib.push_all(f, Scope::Project, pf),
@@ -139,7 +168,7 @@ impl Library {
 
     fn push_all(&mut self, f: BookFile, scope: Scope, file: &Path) {
         for (name, b) in f.bookmarks {
-            self.entries.push(Entry::new(&name, scope.clone(), file, b));
+            self.entries.push(Entry::new(&name, scope.clone(), file, b).with_folders(self.folders.clone()));
         }
     }
 

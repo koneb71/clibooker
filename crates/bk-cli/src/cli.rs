@@ -60,6 +60,17 @@ pub enum Cmd {
     },
     /// Check that folders, envs, .env files and shells still resolve
     Doctor,
+    /// Say where a bookmark's folder is on this device (when it came from another one)
+    Locate {
+        name: String,
+        /// The folder on this device [default: the current folder]
+        dir: Option<std::path::PathBuf>,
+    },
+    /// Folders from your other devices, and where they are on this one (never synced)
+    Folders {
+        #[command(subcommand)]
+        cmd: Option<FoldersCmd>,
+    },
     /// Approve a project's .bk.toml so its bookmarks can run
     Trust {
         /// Project dir or .bk.toml [default: nearest .bk.toml]
@@ -247,6 +258,20 @@ pub enum OnConflict {
     Skip,
     Overwrite,
     Rename,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FoldersCmd {
+    /// Map a folder from your other devices to one on this device
+    Add {
+        /// As bookmarks name it, e.g. ~/work or D:\dev
+        shared: String,
+        /// Where it is on this device
+        local: String,
+    },
+    /// Forget a mapping
+    #[command(visible_alias = "remove")]
+    Rm { shared: String },
 }
 
 #[derive(Debug, Subcommand)]

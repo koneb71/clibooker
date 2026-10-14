@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use bk_core::env::{self, EnvMap, Mode, detect, runtimes};
+use bk_core::folders::Located;
 use bk_core::plan::{self, RunRequest};
 use bk_core::{
-    Bookmark, Entry, EnvSpec, Library, Paths, Scope, Step, history, paths, projects, render, store, template, trust,
+    Bookmark, Entry, EnvSpec, Library, Os, Paths, Scope, Step, history, paths, projects, render, store, template, trust,
 };
 use console::{Term, style};
 use dialoguer::theme::ColorfulTheme;
@@ -314,11 +315,15 @@ pub fn print_details(ctx: &Ctx, e: &Entry, env_note: Option<&str>, with_file: bo
         return;
     }
     let cwd = e.cwd();
-    eprintln!(
-        "{}{}",
-        label("cwd"),
-        cwd.as_deref().map(paths::contract_tilde).unwrap_or_else(|| "(wherever bk runs)".into())
-    );
+    let folder = match e.folder() {
+        None => "(wherever bk runs)".to_string(),
+        Some(Located::Here(p)) => paths::contract_tilde(&p),
+        Some(Located::Mapped { path, shared, local }) => {
+            format!("{}  {}", paths::contract_tilde(&path), style(format!("({shared} → {local} on this device)")).dim())
+        }
+        Some(missing) => style(format!("✗ {}", missing.missing_reason().unwrap_or_default())).yellow().to_string(),
+    };
+    eprintln!("{}{folder}", label("cwd"));
     let check_dir = cwd.clone().unwrap_or_else(|| ctx.cwd.clone());
     let env_status = match env::activate(&b.env, &check_dir, &ctx.env, Mode::Check) {
         Ok(a) => style(a.description).dim().to_string(),
@@ -358,6 +363,18 @@ pub fn print_details(ctx: &Ctx, e: &Entry, env_note: Option<&str>, with_file: bo
         }
         let extra = if extra.is_empty() { String::new() } else { format!("  ({})", extra.join(", ")) };
         eprintln!("{}{}{}", label(&tag), style(&s.run).cyan(), style(extra).dim());
+    }
+    // What runs instead on the other OSes.
+    for os in Os::ALL.into_iter().filter(|os| *os != Os::current()) {
+        if let Some(v) = b.variant(os) {
+            let what = match b.steps_on(os).as_slice() {
+                [one] if v.replaces_steps() => one.run.clone(),
+                many if v.replaces_steps() => format!("{} steps", many.len()),
+                _ => "same command".into(),
+            };
+            let shell = v.shell.as_deref().map(|s| format!("  (in {s})")).unwrap_or_default();
+            eprintln!("{}{}{}", label(os.key()), style(what).cyan(), style(shell).dim());
+        }
     }
     let params = template::bookmark_params(b);
     if !params.is_empty() {
@@ -399,7 +416,12 @@ pub fn ls(ctx: &Ctx, a: &LsArgs) -> Result<i32> {
     let env_w = entries.iter().map(|e| e.bookmark.env_summary().len()).max().unwrap_or(3).clamp(3, 28);
     for e in entries {
         let marker = if e.scope == Scope::Project { style("•").magenta().to_string() } else { " ".into() };
-        let dir = e.cwd().as_deref().map(paths::contract_tilde).unwrap_or_else(|| "-".into());
+        let folder = e.folder();
+        let missing = folder.as_ref().is_some_and(Located::is_missing);
+        let dir = match folder {
+            Some(Located::Missing { written, .. }) => format!("{written} (not here)"),
+            _ => e.cwd().as_deref().map(paths::contract_tilde).unwrap_or_else(|| "-".into()),
+        };
         let env_label = console::truncate_str(&e.bookmark.env_summary(), env_w, "…").into_owned();
         let used = 2 + name_w + 2 + env_w + 2 + console::measure_text_width(&dir) + 2;
         let summary = e.bookmark.summary();
@@ -408,7 +430,7 @@ pub fn ls(ctx: &Ctx, a: &LsArgs) -> Result<i32> {
             "{marker} {}  {}  {}  {}",
             style(format!("{:<name_w$}", e.name)).bold(),
             style(format!("{env_label:<env_w$}")).green(),
-            style(dir).dim(),
+            if missing { style(dir).yellow() } else { style(dir).dim() },
             cmd
         );
     }
@@ -512,7 +534,10 @@ fn collect_params(e: &Entry, given: &[String], yes: bool) -> Result<BTreeMap<Str
 }
 
 pub fn run(ctx: &Ctx, r: RunArgs) -> Result<i32> {
-    let lib = ctx.library();
+    let mut lib = ctx.library();
+    if let Some(fresh) = crate::folders_cmds::ensure_here(ctx, &lib, ctx.find(&lib, &r.name)?)? {
+        lib = fresh;
+    }
     let e = ctx.find(&lib, &r.name)?;
     if !r.dry_run && !r.print {
         ensure_trusted(ctx, e, r.yes)?;
@@ -549,6 +574,9 @@ pub fn run(ctx: &Ctx, r: RunArgs) -> Result<i32> {
         }
     }
 
+    for n in &plan.notes {
+        eprintln!("{} {n}", style("note:").yellow());
+    }
     let started = history::now_ms();
     let outcome = exec::run(&plan)?;
     if lib.settings.history_enabled() {
