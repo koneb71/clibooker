@@ -4,6 +4,7 @@ mod external_term;
 mod folders_cmds;
 #[cfg(windows)]
 mod job;
+mod keys_cmds;
 mod markers;
 mod palette;
 mod runs;
@@ -174,6 +175,16 @@ pub fn run() {
             commands::cli_status,
             commands::install_cli,
             commands::scan_scripts,
+            keys_cmds::keys_list,
+            keys_cmds::keys_suggest_name,
+            keys_cmds::keys_import,
+            keys_cmds::keys_rename,
+            keys_cmds::keys_remove,
+            keys_cmds::keys_lock,
+            keys_cmds::keys_generate,
+            keys_cmds::keys_unlock,
+            keys_cmds::keys_passphrase,
+            keys_cmds::keys_install,
             servers_cmds::list_servers,
             servers_cmds::save_server,
             servers_cmds::delete_server,

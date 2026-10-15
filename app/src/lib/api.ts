@@ -1,6 +1,6 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Bookmark, CliStatus, DoctorReport, FolderRule, FolderScan, Inventory, Library, LocateResult, Preview, Reach, RecentCommand, RemoteFolder, RemoteInventory, RunInfo, RunRecord, ScriptScan, Server, ServerInfo, Settings, SyncContact, SyncResult, SyncStatus } from "./types";
+import type { Bookmark, CliStatus, DoctorReport, FolderRule, FolderScan, Inventory, KeysInfo, KeyType, Library, LocateResult, Preview, Reach, RecentCommand, RemoteFolder, RemoteInventory, RunInfo, RunRecord, ScriptScan, Server, ServerInfo, Settings, SshKey, SyncContact, SyncResult, SyncStatus } from "./types";
 
 export const inTauri = isTauri();
 
@@ -118,6 +118,19 @@ export const api = {
   foldersSet: (shared: string, local: string) => call<string | null>("folders_set", { shared, local }),
   foldersRemove: (shared: string) => call<boolean>("folders_remove", { shared }),
   locateFolder: (id: string, dir: string) => call<LocateResult>("locate_folder", { id, dir }),
+  keysList: () => call<KeysInfo>("keys_list"),
+  keysSuggestName: (path: string) => call<string>("keys_suggest_name", { path }),
+  keysImport: (name: string, from: { path: string } | { text: string }) =>
+    call<SshKey>("keys_import", { name, path: "path" in from ? from.path : null, text: "text" in from ? from.text : null }),
+  keysRename: (from: string, to: string) => call<string[]>("keys_rename", { from, to }),
+  keysRemove: (name: string) => call<void>("keys_remove", { name }),
+  keysLock: (name: string) => call<void>("keys_lock", { name }),
+  keysGenerate: (name: string, comment: string | null, kind: KeyType, passphrase: boolean, cols: number, rows: number) =>
+    call<RunInfo>("keys_generate", { name, comment, kind, passphrase, cols, rows }),
+  keysUnlock: (name: string, cols: number, rows: number) => call<RunInfo>("keys_unlock", { name, cols, rows }),
+  keysPassphrase: (name: string, cols: number, rows: number) => call<RunInfo>("keys_passphrase", { name, cols, rows }),
+  keysInstall: (name: string, server: string, cols: number, rows: number) =>
+    call<RunInfo>("keys_install", { name, server, cols, rows }),
   installCli: () => call<string>("install_cli"),
   runDoctor: () => call<DoctorReport>("run_doctor"),
   getInbox: (limit: number) => call<RecentCommand[]>("get_inbox", { limit }),
@@ -144,6 +157,13 @@ export async function pickFolder(defaultPath?: string): Promise<string | null> {
   if (!inTauri) return window.prompt("Folder path", defaultPath ?? "~/") || null;
   const { open } = await import("@tauri-apps/plugin-dialog");
   const res = await open({ directory: true, multiple: false, defaultPath: await expandHome(defaultPath) });
+  return typeof res === "string" ? res : null;
+}
+
+export async function pickFile(defaultPath?: string): Promise<string | null> {
+  if (!inTauri) return window.prompt("File path", defaultPath ?? "~/") || null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const res = await open({ multiple: false, defaultPath: await expandHome(defaultPath) });
   return typeof res === "string" ? res : null;
 }
 

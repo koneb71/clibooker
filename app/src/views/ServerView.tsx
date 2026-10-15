@@ -1,13 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, RefreshCw, ShieldCheck, SquareTerminal, Trash2 } from "lucide-react";
+import { KeyRound, RefreshCw, ShieldCheck, SquareTerminal, Trash2 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { KeyValueEditor, newKey, TagInput, type VarDraft } from "../components/editors";
 import { Badge, Button, Dialog, Field, IconButton, Input, Select } from "../components/ui";
-import { api, inTauri } from "../lib/api";
-import { contractHome, joinPath } from "../lib/platform";
-import { keys, useLibrary, useServerInventory, useServers, useServerStatus } from "../lib/queries";
-import { ALLOWED_SSH_OPTIONS, type Reach, type Server } from "../lib/types";
+import { api } from "../lib/api";
+import { keys, useKeys, useLibrary, useServerInventory, useServers, useServerStatus } from "../lib/queries";
+import { ALLOWED_SSH_OPTIONS, type Reach, savedKeyName, type Server } from "../lib/types";
+import { InstallKeyDialog, KeyPicker, useKeyTask } from "../components/Keys";
 import { cn, nameError, relativeTime } from "../lib/utils";
 import { useRuns } from "../stores/runs";
 import { useUi } from "../stores/ui";
@@ -33,7 +33,7 @@ export function reachText(r?: Reach | null): string {
     case "reachable":
       return `Reachable · ${r.ms} ms`;
     case "auth-required":
-      return "Needs a password or a key that isn't loaded";
+      return "Needs a password or a key";
     case "unknown-host-key":
       return "Host key not trusted yet";
     case "changed-host-key":
@@ -174,6 +174,43 @@ export function RemoveServerDialog() {
   );
 }
 
+/** The server wants a password or a key that isn't loaded: unlock its key, or set one up. */
+function AuthBanner({ server, identity }: { server: string; identity?: string | null }) {
+  const { data: keysInfo } = useKeys();
+  const { unlock } = useKeyTask();
+  const [installing, setInstalling] = useState(false);
+  const key = keysInfo?.keys.find((k) => k.name === savedKeyName(identity));
+  const locked = key?.encrypted && !key.unlocked && !keysInfo?.no_agent;
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-line bg-panel px-4 py-3 text-[13px] text-muted">
+      <KeyRound size={16} className="shrink-0 text-faint" />
+      <span className="flex-1">
+        {locked ? (
+          <>
+            Its key <b className="text-fg">{key.name}</b> is locked. Unlock it once so background checks and env discovery can use it;
+            Connect asks for the passphrase in the terminal.
+          </>
+        ) : (
+          <>
+            The server wants a password or a key that isn't loaded. You can still <b>Connect</b> and type it in the terminal; for
+            background checks and env discovery, set up a key.
+          </>
+        )}
+      </span>
+      {locked ? (
+        <Button size="sm" onClick={() => void unlock(key.name)}>
+          Unlock {key.name}
+        </Button>
+      ) : (
+        <Button size="sm" onClick={() => setInstalling(true)}>
+          Set up a key…
+        </Button>
+      )}
+      {installing && <InstallKeyDialog server={server} defaultKey={key?.name} open onOpenChange={setInstalling} />}
+    </div>
+  );
+}
+
 export function ServerView() {
   const { selectedServer, select, selectServer, askRemoveServer, setDirty } = useUi();
   const { data: servers } = useServers();
@@ -298,10 +335,7 @@ export function ServerView() {
             </div>
           )}
           {reach?.state === "auth-required" && (
-            <div className="rounded-lg border border-line bg-panel px-4 py-3 text-[13px] text-muted">
-              The server wants a password or a key that isn't loaded. You can still <b>Connect</b> and type it in the terminal;
-              background checks and env discovery need key-based login (<code className="font-mono">ssh-add</code>).
-            </div>
+            <AuthBanner server={selectedServer} identity={info?.server?.identity} />
           )}
 
           {editable ? (
@@ -325,20 +359,13 @@ export function ServerView() {
                   <Input mono value={draft.port} onChange={(e) => set("port", e.target.value.replace(/\D/g, ""))} placeholder="22" />
                 </Field>
               </div>
-              <Field label="Private key" hint="Leave empty to use your ssh-agent / default keys">
-                <div className="flex gap-2">
-                  <Input mono value={draft.identity} onChange={(e) => set("identity", e.target.value)} placeholder="~/.ssh/id_ed25519" />
-                  <Button
-                    onClick={async () => {
-                      if (!inTauri) return;
-                      const { open } = await import("@tauri-apps/plugin-dialog");
-                      const f = await open({ multiple: false, defaultPath: lib?.home ? joinPath(lib.home, ".ssh") : undefined });
-                      if (typeof f === "string") set("identity", contractHome(f, lib?.home));
-                    }}
-                  >
-                    <FolderOpen size={13} /> Choose…
-                  </Button>
-                </div>
+              <Field label="Private key">
+                <KeyPicker
+                  value={draft.identity}
+                  onChange={(identity) => set("identity", identity)}
+                  server={isNew ? draft.name : selectedServer}
+                  canInstall={!isNew && !dirty}
+                />
               </Field>
               <Field label="Jump host" hint="Connect through a bastion: another server's name or user@host[:port]">
                 <Input mono list="jump-servers" value={draft.jump} onChange={(e) => set("jump", e.target.value)} placeholder="bastion" />

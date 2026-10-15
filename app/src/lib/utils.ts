@@ -86,10 +86,24 @@ export function duration(ms: number): string {
 
 export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 export const RESERVED = new Set([
-  "add", "app", "completions", "doctor", "edit", "export", "go", "help", "history", "import", "init",
-  "list", "ls", "mv", "pick", "remove", "rename", "rm", "run", "save", "scan", "server", "servers", "settings",
-  "show", "ssh", "trust",
+  "add", "app", "completions", "doctor", "edit", "export", "folders", "go", "help", "history", "import", "init",
+  "keys", "list", "locate", "ls", "mv", "pick", "remove", "rename", "rm", "run", "save", "scan", "server", "servers",
+  "settings", "show", "ssh", "sync", "trust",
 ]);
+
+/** Saved SSH key names: the same file name on every OS (lowercase, no dots). */
+export function keyNameError(name: string): string | null {
+  if (!name) return "Name is required";
+  if (!/^[a-z0-9_][a-z0-9_-]{0,63}$/.test(name)) return "Lowercase letters, digits, - and _ only";
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(name)) return "Windows can't use that name for a file";
+  return null;
+}
+
+/** A key name from anything (a server name, a device name). */
+export function toKeyName(s: string): string {
+  const name = s.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9_]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  return keyNameError(name) ? "key" : name;
+}
 
 export function nameError(name: string): string | null {
   if (!name) return "Name is required";

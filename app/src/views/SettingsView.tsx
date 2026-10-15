@@ -7,27 +7,35 @@ import {
   FolderGit2,
   FolderInput,
   FolderOpen,
+  KeyRound,
   Laptop,
   Loader2,
+  LockKeyhole,
+  LockKeyholeOpen,
+  Pencil,
+  RectangleEllipsis,
   RefreshCw,
   Send,
   TerminalSquare,
+  Trash2,
   TriangleAlert,
+  Upload,
   X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, copyText, inTauri, pickFolder } from "../lib/api";
-import { keys, useInventory, useLibrary } from "../lib/queries";
+import { keys, useInventory, useKeys, useLibrary } from "../lib/queries";
 import { computerNoun, contractHome, isLinux, isMac, isWindows, kbd, platform, shellOptions, shellSetup, trayName } from "../lib/platform";
-import type { Settings, SyncContact } from "../lib/types";
-import { cn, relativeTime } from "../lib/utils";
+import type { Settings, SshKey, SyncContact } from "../lib/types";
+import { cn, keyNameError, relativeTime } from "../lib/utils";
 import { useTheme } from "../stores/theme";
-import { Button, Field, IconButton, Input, Select, Switch } from "../components/ui";
+import { Button, Dialog, Field, IconButton, Input, Select, Switch } from "../components/ui";
+import { ImportKeyDialog, KeyFacts, NewKeyDialog, useKeyTask } from "../components/Keys";
 
 function Group({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return (
-    <section className="grid grid-cols-[200px_1fr] gap-6 border-b border-line py-6 last:border-b-0">
+    <section className="grid grid-cols-[200px_minmax(0,1fr)] gap-6 border-b border-line py-6 last:border-b-0">
       <div>
         <h2 className="text-[13px] font-semibold">{title}</h2>
         {description && <p className="mt-1 text-xs leading-relaxed text-muted">{description}</p>}
@@ -345,6 +353,8 @@ export function SettingsView() {
 
           <SyncGroup />
 
+          <KeysGroup />
+
           <FoldersGroup />
 
           <Group title="Projects" description="Repos with a .bk.toml. Their bookmarks live in the repo and can be committed.">
@@ -521,6 +531,210 @@ function FoldersGroup() {
         </Button>
       </div>
     </Group>
+  );
+}
+
+/** Saved SSH keys: listed with what they're for, and what you can do with them. */
+function KeysGroup() {
+  const { data: info, refetch } = useKeys();
+  const task = useKeyTask();
+  const qc = useQueryClient();
+  const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [renaming, setRenaming] = useState<SshKey | null>(null);
+  const [deleting, setDeleting] = useState<SshKey | null>(null);
+  if (!info) return null;
+
+  const lock = async (k: SshKey) => {
+    try {
+      await api.keysLock(k.name);
+      toast.success(`Locked ${k.name}`, { description: "Its passphrase is asked for again next time." });
+    } catch (e) {
+      toast.error(`Couldn't lock ${k.name}`, { description: String(e) });
+    }
+    await refetch();
+  };
+
+  return (
+    <Group
+      title="SSH keys"
+      description={
+        <>
+          Keys saved here {info.synced ? "sync to your other devices, end-to-end encrypted" : "stay on this device until you set up sync"}.
+          Servers use them as <code className="font-mono">key:NAME</code>. Passphrases are typed into OpenSSH in a terminal tab, never
+          into Clibooker.
+        </>
+      }
+    >
+      {info.no_agent && (
+        <div className="flex flex-col gap-1.5 text-xs leading-relaxed">
+          <p className="flex items-start gap-1.5 text-warn">
+            <TriangleAlert size={13} className="mt-px shrink-0" />
+            <span>
+              {info.no_agent.why[0].toUpperCase() + info.no_agent.why.slice(1)}, so a key's passphrase is asked for every time.
+              {info.no_agent.fix && " To start it, run this in PowerShell as administrator:"}
+            </span>
+          </p>
+          {info.no_agent.fix && (
+            <div className="ml-[19px] flex items-center gap-1 rounded-md border border-line bg-panel py-1 pr-1 pl-2.5">
+              <code className="selectable min-w-0 flex-1 font-mono text-[11px] text-fg">{info.no_agent.fix}</code>
+              <IconButton
+                label="Copy"
+                onClick={async () => {
+                  await copyText(info.no_agent!.fix!);
+                  toast.success("Copied");
+                }}
+              >
+                <Copy size={12} />
+              </IconButton>
+            </div>
+          )}
+        </div>
+      )}
+      {info.keys.length === 0 && (
+        <p className="text-xs text-faint">
+          No saved keys yet. Import one you have (like <code className="font-mono">~/.ssh/id_ed25519</code>) or make a new one.
+        </p>
+      )}
+      {info.keys.map((k) => (
+        <div key={k.name} className="flex flex-col gap-1 rounded-md border border-line px-3 py-2">
+          <div className="flex items-center gap-2">
+            <KeyRound size={14} className="shrink-0 text-muted" />
+            <span className="font-mono text-[13px] font-medium text-fg">{k.name}</span>
+            <KeyFacts k={k} />
+            <span className="min-w-0 flex-1 truncate text-right text-xs text-faint" title={k.used_by.join(", ") || undefined}>
+              {k.used_by.length ? `used by ${k.used_by.join(", ")}` : "not used by a server"}
+            </span>
+            <div className="flex shrink-0 items-center">
+              <IconButton
+                label="Copy public key"
+                onClick={async () => {
+                  await copyText(k.public);
+                  toast.success("Public key copied", { description: "For a server's ~/.ssh/authorized_keys" });
+                }}
+              >
+                <Copy size={13} />
+              </IconButton>
+              {k.unlocked ? (
+                <IconButton label="Lock: ask for its passphrase again" onClick={() => void lock(k)}>
+                  <LockKeyhole size={13} />
+                </IconButton>
+              ) : (
+                k.encrypted &&
+                !info.no_agent && (
+                  <IconButton label="Unlock: type its passphrase once" onClick={() => void task.unlock(k.name)}>
+                    <LockKeyholeOpen size={13} />
+                  </IconButton>
+                )
+              )}
+              <IconButton label={k.encrypted ? "Change passphrase" : "Add a passphrase"} onClick={() => void task.passphrase(k.name)}>
+                <RectangleEllipsis size={13} />
+              </IconButton>
+              <IconButton label="Rename" onClick={() => setRenaming(k)}>
+                <Pencil size={13} />
+              </IconButton>
+              <IconButton label="Delete" className="hover:text-err" onClick={() => setDeleting(k)}>
+                <Trash2 size={13} />
+              </IconButton>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 pl-[22px] text-[11px] text-faint">
+            <span className="selectable truncate font-mono">{k.fingerprint}</span>
+            {k.comment && <span className="truncate">· {k.comment}</span>}
+          </div>
+          {k.clash && (
+            <p className="flex items-center gap-1.5 pl-[22px] text-xs text-warn">
+              <TriangleAlert size={12} className="shrink-0" />
+              Another device has a different key named {k.name}. Rename one of them so both sync.
+            </p>
+          )}
+        </div>
+      ))}
+      <div className="flex gap-2">
+        <Button size="sm" onClick={() => setCreating(true)}>
+          <KeyRound size={12} /> New key…
+        </Button>
+        <Button size="sm" onClick={() => setImporting(true)}>
+          <Upload size={12} /> Import…
+        </Button>
+        <span className="ml-auto self-center font-mono text-[11px] text-faint">{info.folder}</span>
+      </div>
+
+      <NewKeyDialog open={creating} onOpenChange={setCreating} />
+      <ImportKeyDialog open={importing} onOpenChange={setImporting} />
+      {renaming && <RenameKeyDialog k={renaming} onClose={() => setRenaming(null)} />}
+      {deleting && (
+        <Dialog
+          open
+          onOpenChange={(o) => !o && setDeleting(null)}
+          title={`Delete key ${deleting.name}?`}
+          description={
+            <>
+              {info.synced ? "It's deleted from your other devices too, at their next sync. " : ""}
+              {deleting.used_by.length
+                ? `${deleting.used_by.join(", ")} ${deleting.used_by.length === 1 ? "uses" : "use"} it; ssh then tries your agent and default keys instead.`
+                : "No server uses it."}{" "}
+              Copies elsewhere (like ~/.ssh) aren't touched.
+            </>
+          }
+        >
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setDeleting(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              className="bg-err text-white"
+              onClick={async () => {
+                try {
+                  await api.keysRemove(deleting.name);
+                  toast.success(`Deleted key ${deleting.name}`);
+                } catch (e) {
+                  toast.error("Couldn't delete it", { description: String(e) });
+                }
+                setDeleting(null);
+                await qc.invalidateQueries({ queryKey: ["keys"] });
+              }}
+            >
+              Delete
+            </Button>
+          </div>
+        </Dialog>
+      )}
+    </Group>
+  );
+}
+
+function RenameKeyDialog({ k, onClose }: { k: SshKey; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState(k.name);
+  const err = name === k.name ? null : keyNameError(name);
+  const rename = async () => {
+    try {
+      const moved = await api.keysRename(k.name, name);
+      toast.success(`Renamed ${k.name} to ${name}`, { description: moved.length ? `Updated ${moved.join(", ")}` : undefined });
+      onClose();
+      await qc.invalidateQueries({ queryKey: ["keys"] });
+      await qc.invalidateQueries({ queryKey: ["servers"] });
+      await qc.invalidateQueries({ queryKey: keys.library });
+    } catch (e) {
+      toast.error("Couldn't rename it", { description: String(e) });
+    }
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()} title={`Rename key ${k.name}`} description="Servers that use it follow.">
+      <Field label="New name" error={err}>
+        <Input mono autoFocus value={name} onChange={(e) => setName(e.target.value.toLowerCase())} onKeyDown={(e) => e.key === "Enter" && !err && name !== k.name && void rename()} />
+      </Field>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button variant="primary" disabled={!!err || name === k.name} onClick={() => void rename()}>
+          Rename
+        </Button>
+      </div>
+    </Dialog>
   );
 }
 

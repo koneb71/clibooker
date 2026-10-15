@@ -87,6 +87,12 @@ export function MainApp() {
         if (info.status !== "running" && !isNew) {
           qc.invalidateQueries({ queryKey: keys.library });
           qc.invalidateQueries({ queryKey: ["history"] });
+          // A key was made, unlocked or installed (and a server may use it now).
+          if (info.kind === "task") {
+            qc.invalidateQueries({ queryKey: ["keys"] });
+            qc.invalidateQueries({ queryKey: ["servers"] });
+            qc.invalidateQueries({ queryKey: ["server-status"] });
+          }
         }
       }),
       on<string>("focus-run", (id) => useRuns.getState().activate(id)),
@@ -110,6 +116,7 @@ export function MainApp() {
         }
         qc.invalidateQueries({ queryKey: ["sync-status"] });
         qc.invalidateQueries({ queryKey: ["servers"] });
+        qc.invalidateQueries({ queryKey: ["keys"] });
       }),
     ];
     return () => offs.forEach((off) => off());

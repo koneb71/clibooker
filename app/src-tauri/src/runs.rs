@@ -55,6 +55,8 @@ pub enum Status {
 pub enum Kind {
     Bookmark,
     Session,
+    /// One of OpenSSH's tools for a saved key (making, unlocking, installing one).
+    Task,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,6 +229,24 @@ pub struct StartOptions {
     pub history_file: PathBuf,
 }
 
+impl StartOptions {
+    /// A tab you type into (a session, a task): no notification, no history.
+    pub fn interactive(paths: &Paths, cols: u16, rows: u16) -> StartOptions {
+        StartOptions {
+            cols,
+            rows,
+            background: false,
+            notify: false,
+            record_history: false,
+            history_file: paths.history_file(),
+        }
+    }
+}
+
+/// What to do when a run ends, before its footer: it gets the outcome and a way to print lines
+/// in the run's terminal.
+pub type Then = Box<dyn FnOnce(Status, &dyn Fn(&str)) + Send>;
+
 /// What to start in a PTY.
 pub struct Spawn {
     pub kind: Kind,
@@ -250,6 +270,7 @@ pub struct Spawn {
     pub tmux: Option<(String, bool)>,
     /// Windows local runs: the steps file to write for `bk __run`, and its progress file.
     pub local_steps: Option<LocalSteps>,
+    pub then: Option<Then>,
 }
 
 pub struct LocalSteps {
@@ -308,6 +329,7 @@ impl Spawn {
             record: Some(RunRecord::from_plan(plan, "app", 0)),
             tmux: None,
             local_steps: None,
+            then: None,
         }
     }
 
@@ -353,6 +375,7 @@ impl Spawn {
                 steps_json: serde_json::to_string(&steps).unwrap_or_default(),
                 progress_file,
             }),
+            then: None,
         }
     }
 
@@ -383,6 +406,7 @@ impl Spawn {
             record: Some(RunRecord::from_remote(plan, "app", 0)),
             tmux: None,
             local_steps: None,
+            then: None,
         }
     }
 
@@ -415,6 +439,36 @@ impl Spawn {
             record: None,
             tmux: None,
             local_steps: None,
+            then: None,
+        }
+    }
+}
+
+impl Spawn {
+    /// One of OpenSSH's tools in a tab (`ssh-keygen`, `ssh-add`, an ssh that installs a key),
+    /// for you to type a passphrase or password into. `then` runs when it ends.
+    pub fn task(name: &str, program: &str, args: Vec<String>, env: EnvMap, label: &str, then: Option<Then>) -> Spawn {
+        let mut env = env;
+        term_env(&mut env);
+        Spawn {
+            kind: Kind::Task,
+            name: name.to_string(),
+            entry_id: String::new(),
+            program: program.to_string(),
+            args,
+            cwd: paths::home(),
+            env,
+            step_labels: Vec::new(),
+            cwd_label: label.to_string(),
+            env_label: label.to_string(),
+            params: BTreeMap::new(),
+            server: None,
+            remote: None,
+            forwards: Vec::new(),
+            record: None,
+            tmux: None,
+            local_steps: None,
+            then,
         }
     }
 }
@@ -624,6 +678,7 @@ impl RunManager {
         let waiter_app = app.clone();
         let waiter_run = run.clone();
         let record = spawn.record;
+        let then = spawn.then;
         let final_progress = spawn.local_steps.as_ref().map(|ls| (ls.progress_file.clone(), spawn.step_labels.clone()));
         std::thread::Builder::new().name(format!("{id}-waiter")).spawn(move || {
             let started = Instant::now();
@@ -646,7 +701,7 @@ impl RunManager {
                     handle_marker(&waiter_run, &waiter_app, labels, line.trim());
                 }
             }
-            finish(waiter_app, waiter_run, record, status, started.elapsed(), opts);
+            finish(waiter_app, waiter_run, record, then, status, started.elapsed(), opts);
             for f in temp_files {
                 let _ = std::fs::remove_file(f);
             }
@@ -869,6 +924,7 @@ fn finish<R: Runtime>(
     app: AppHandle<R>,
     run: Arc<Run>,
     record: Option<RunRecord>,
+    then: Option<Then>,
     status: std::io::Result<portable_pty::ExitStatus>,
     elapsed: Duration,
     opts: StartOptions,
@@ -891,6 +947,13 @@ fn finish<R: Runtime>(
     if run.tmux_bookmark.is_some() && done.is_none() && !stopped {
         state = Status::Detached;
         code = 0;
+    }
+    if let Some(then) = then {
+        let print = |line: &str| {
+            let text = format!("\r\n{}", line.replace('\n', "\r\n"));
+            run.output.lock().expect("output lock").push(text.as_bytes());
+        };
+        then(state, &print);
     }
     let server = run.info().server.unwrap_or_default();
     let took = fmt_duration(elapsed);
@@ -1301,6 +1364,39 @@ mod ssh_e2e {
 
     fn output(mgr: &RunManager, id: &str) -> String {
         String::from_utf8_lossy(&mgr.get(id).unwrap().output.lock().unwrap().buf).into_owned()
+    }
+
+    /// A key task's tab: what `then` prints comes after the tool's output, before the footer,
+    /// and it learns how the tool ended.
+    #[test]
+    fn tasks_then_print_in_their_tab() {
+        let mgr = RunManager::default();
+        let app = tauri::test::mock_app();
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths { config_file: d.path().join("b.toml"), data_dir: d.path().join("data") };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        for code in [0, 3] {
+            let seen = seen.clone();
+            let then: Then = Box::new(move |status, print| {
+                seen.lock().unwrap().push(status);
+                print(&format!("after {status:?}\nsecond line"));
+            });
+            let args = vec!["-c".into(), format!("echo from-the-tool; exit {code}")];
+            let spawn = Spawn::task("t", "/bin/sh", args, bk_core::env::current(), "sh", Some(then));
+            let info = mgr.start(app.handle().clone(), spawn, StartOptions::interactive(&paths, 80, 24), None).unwrap();
+            assert_eq!(info.kind, Kind::Task);
+            let done = wait_done(&mgr, &info.id, 10);
+            assert_eq!(done.exit_code, Some(code));
+            let out = output(&mgr, &info.id);
+            let (tool, then, footer) = (
+                out.find("from-the-tool").unwrap(),
+                out.find("second line").unwrap(),
+                out.find(if code == 0 { "done in" } else { "exit 3" }).unwrap(),
+            );
+            assert!(tool < then && then < footer, "{out}");
+            assert!(out.contains("\r\nsecond line"), "{out}");
+        }
+        assert_eq!(*seen.lock().unwrap(), [Status::Succeeded, Status::Failed]);
     }
 
     #[test]

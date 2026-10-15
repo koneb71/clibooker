@@ -176,17 +176,6 @@ pub async fn trust_host(state: State<'_, AppState>, name: String) -> CmdResult<R
     Ok(reach)
 }
 
-fn session_opts(state: &AppState, cols: u16, rows: u16) -> StartOptions {
-    StartOptions {
-        cols,
-        rows,
-        background: false,
-        notify: false,
-        record_history: false,
-        history_file: state.paths.history_file(),
-    }
-}
-
 /// Interactive login session in a terminal tab.
 #[tauri::command]
 pub fn connect_server(
@@ -202,7 +191,7 @@ pub fn connect_server(
     let args = remote::session_args(&program, &t, &state.paths);
     let spawn = Spawn::session(&t.name, &program, args, &t, env.clone(), t.forward.clone());
     let ctl = crate::runs::RemoteCtl { program, target: t, paths: state.paths.clone(), env };
-    state.runs.start(app, spawn, session_opts(&state, cols, rows), Some(&ctl)).map_err(e)
+    state.runs.start(app, spawn, StartOptions::interactive(&state.paths, cols, rows), Some(&ctl)).map_err(e)
 }
 
 /// A shell on the server in a remote bookmark's folder and env.
@@ -225,7 +214,7 @@ pub fn shell_here(app: AppHandle, state: State<'_, AppState>, id: String, cols: 
     let (t, args) = remote::shell_here(entry, &inp).map_err(e)?;
     let env = servers::ssh_env(&base);
     let spawn = Spawn::session(&format!("{} (shell)", entry.name), &inp.ssh_program, args, &t, env, Vec::new());
-    state.runs.start(app, spawn, session_opts(&state, cols, rows), None).map_err(e)
+    state.runs.start(app, spawn, StartOptions::interactive(&state.paths, cols, rows), None).map_err(e)
 }
 
 #[derive(Serialize)]

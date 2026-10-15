@@ -64,6 +64,11 @@ export function useServerStatus(name: string | null | undefined, enabled = true)
   });
 }
 
+/** Saved SSH keys, with which ones ssh-agent holds. */
+export function useKeys() {
+  return useQuery({ queryKey: ["keys"], queryFn: api.keysList, staleTime: 10_000 });
+}
+
 export function useHistory(name?: string, limit = 300) {
   return useQuery({ queryKey: keys.history(name), queryFn: () => api.getHistory(limit, name) });
 }

@@ -476,6 +476,15 @@ pub fn generate_args(paths: &Paths, name: &str, comment: &str, kind: KeyType, pa
     Ok(a)
 }
 
+/// `ssh-keygen` arguments that add or change a saved key's passphrase (it asks for them).
+pub fn passphrase_args(paths: &Paths, name: &str) -> Result<Vec<String>> {
+    let file = path(paths, name)?;
+    if !file.is_file() {
+        bail!("no saved key named `{name}`");
+    }
+    Ok(vec!["-p".into(), "-f".into(), file.display().to_string()])
+}
+
 fn agent_args(ssh_add: &str, paths: &Paths, name: &str, remove: bool) -> Result<Vec<String>> {
     let file = path(paths, name)?;
     if !file.is_file() {
@@ -508,11 +517,32 @@ pub fn lock_args(ssh_add: &str, paths: &Paths, name: &str) -> Result<Vec<String>
 pub enum Agent {
     /// The fingerprints of its keys.
     Running(Vec<String>),
-    /// Why there's no agent, and how to start one.
-    Unavailable(String),
+    Unavailable(NoAgent),
+}
+
+/// Why there's no ssh-agent, and the command that starts one, when there is one to give.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NoAgent {
+    pub why: String,
+    /// Windows: the PowerShell command (run as administrator) that starts the agent service.
+    pub fix: Option<String>,
+}
+
+impl std::fmt::Display for NoAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)?;
+        match &self.fix {
+            Some(fix) => write!(f, "; to start it, run in PowerShell as administrator: {fix}"),
+            None => Ok(()),
+        }
+    }
 }
 
 impl Agent {
+    fn missing(why: impl Into<String>) -> Agent {
+        Agent::Unavailable(NoAgent { why: why.into(), fix: None })
+    }
+
     pub fn holds(&self, fingerprint: &str) -> bool {
         matches!(self, Agent::Running(fps) if fps.iter().any(|f| f == fingerprint))
     }
@@ -530,7 +560,7 @@ pub fn agent(ssh_add: &str, env: &EnvMap) -> Agent {
         .spawn();
     let out = match child {
         Ok(c) => servers::wait_with_timeout(c, Duration::from_secs(3)),
-        Err(e) => return Agent::Unavailable(format!("can't run {ssh_add}: {e}")),
+        Err(e) => return Agent::missing(format!("can't run {ssh_add}: {e}")),
     };
     match out {
         Ok((Some(0), stdout, _)) => Agent::Running(
@@ -543,19 +573,18 @@ pub fn agent(ssh_add: &str, env: &EnvMap) -> Agent {
         ),
         // "The agent has no identities."
         Ok((Some(1), _, _)) => Agent::Running(Vec::new()),
-        Ok(_) if cfg!(windows) => Agent::Unavailable(
-            "the OpenSSH Authentication Agent service isn't running. To start it, run in PowerShell as \
-             administrator: Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent"
-                .into(),
-        ),
+        Ok(_) if cfg!(windows) => Agent::Unavailable(NoAgent {
+            why: "the OpenSSH Authentication Agent service isn't running".into(),
+            fix: Some("Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent".into()),
+        }),
         Ok(_) if !env.keys().any(|k| k.is("SSH_AUTH_SOCK")) => {
-            Agent::Unavailable("ssh-agent isn't running here (SSH_AUTH_SOCK isn't set)".into())
+            Agent::missing("ssh-agent isn't running here (SSH_AUTH_SOCK isn't set)")
         }
         Ok((_, _, stderr)) => {
             let why = String::from_utf8_lossy(&stderr).lines().next().unwrap_or_default().trim().to_string();
-            Agent::Unavailable(format!("can't reach ssh-agent: {why}"))
+            Agent::missing(format!("can't reach ssh-agent: {why}"))
         }
-        Err(e) => Agent::Unavailable(format!("ssh-agent didn't answer: {e:#}")),
+        Err(e) => Agent::missing(format!("ssh-agent didn't answer: {e:#}")),
     }
 }
 
@@ -888,6 +917,7 @@ mod tests {
         let lab = dir(&p).join("lab").display().to_string();
         assert_eq!(unlock_args("ssh-add", &p, "lab").unwrap(), [lab.as_str()]);
         assert_eq!(lock_args("ssh-add", &p, "lab").unwrap(), ["-d", lab.as_str()]);
+        assert_eq!(passphrase_args(&p, "lab").unwrap(), ["-p", "-f", lab.as_str()]);
         assert!(generate_args(&p, "lab", "", KeyType::Ed25519, false).is_err());
     }
 

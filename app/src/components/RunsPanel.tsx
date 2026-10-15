@@ -4,6 +4,7 @@ import {
   ChevronUp,
   ClipboardCopy,
   Globe,
+  KeyRound,
   Pause,
   RotateCcw,
   Square,
@@ -90,6 +91,7 @@ export function RunsPanel() {
               >
                 <StatusDot status={r.status} />
                 {r.kind === "session" && <SquareTerminal size={11} className="shrink-0 text-faint" />}
+                {r.kind === "task" && <KeyRound size={11} className="shrink-0 text-faint" />}
                 <span className="truncate font-medium">{r.name}</span>
                 {r.server && r.kind === "bookmark" && (
                   <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-faint">
@@ -147,7 +149,7 @@ export function RunsPanel() {
                 <span className="ml-1.5 text-warn">connection lost</span>
               ) : (
                 current.status !== "running" &&
-                current.kind === "bookmark" &&
+                current.kind !== "session" &&
                 current.exit_code !== null &&
                 current.exit_code !== 0 && <span className="ml-1.5 text-err">exit {current.exit_code}</span>
               )}
@@ -166,12 +168,14 @@ export function RunsPanel() {
                 <Square size={13} fill="currentColor" />
               </IconButton>
             ) : (
-              <IconButton
-                label={current.kind === "session" ? "Reconnect" : current.status === "detached" ? "Attach again" : "Run again"}
-                onClick={() => rerun(current)}
-              >
-                <RotateCcw size={14} />
-              </IconButton>
+              current.kind !== "task" && (
+                <IconButton
+                  label={current.kind === "session" ? "Reconnect" : current.status === "detached" ? "Attach again" : "Run again"}
+                  onClick={() => rerun(current)}
+                >
+                  <RotateCcw size={14} />
+                </IconButton>
+              )
             )}
             <IconButton
               label="Copy output"

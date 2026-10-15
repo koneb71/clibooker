@@ -35,6 +35,8 @@ interface RunsState {
   connect: (server: string) => Promise<RunInfo | null>;
   /** Shell on the server in a remote bookmark's folder and env. */
   shellHere: (entryId: string) => Promise<RunInfo | null>;
+  /** One of OpenSSH's tools for a saved key, in a tab of its own. */
+  task: (what: string, start: (cols: number, rows: number) => Promise<RunInfo>) => Promise<RunInfo | null>;
 }
 
 export const useRuns = create<RunsState>((set, get) => ({
@@ -111,6 +113,18 @@ export const useRuns = create<RunsState>((set, get) => ({
       return info;
     } catch (e) {
       toast.error("Could not open a shell", { description: String(e) });
+      return null;
+    }
+  },
+
+  task: async (what, start) => {
+    const { cols, rows } = get().termSize;
+    try {
+      const info = await start(cols, rows);
+      get().upsert(info, { focus: true });
+      return info;
+    } catch (e) {
+      toast.error(`Could not ${what}`, { description: String(e) });
       return null;
     }
   },

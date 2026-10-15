@@ -244,7 +244,8 @@ export interface ForwardInfo {
 
 export interface RunInfo {
   id: string;
-  kind: "bookmark" | "session";
+  /** A task is one of OpenSSH's tools for a saved key (making, unlocking, installing one). */
+  kind: "bookmark" | "session" | "task";
   server: string | null;
   forwards: ForwardInfo[];
   /** tmux session for runs that keep running on the server. */
@@ -427,3 +428,39 @@ export const ALLOWED_SSH_OPTIONS = [
   "IdentitiesOnly",
   "ConnectionAttempts",
 ];
+
+/** A saved SSH key (servers use it as `identity = "key:NAME"`). Nothing secret. */
+export interface SshKey {
+  name: string;
+  /** `ED25519`, `RSA 4096`, … */
+  kind: string;
+  /** `SHA256:…` */
+  fingerprint: string;
+  comment: string;
+  /** It has a passphrase. */
+  encrypted: boolean;
+  /** The public key line. */
+  public: string;
+  /** ssh-agent holds it: its passphrase was typed and is remembered. */
+  unlocked: boolean;
+  used_by: string[];
+  /** Another device has a different key under this name. */
+  clash: boolean;
+  file: string;
+}
+
+export interface KeysInfo {
+  keys: SshKey[];
+  /** Why ssh-agent can't remember passphrases here, and (Windows) the command that starts it. */
+  no_agent: { why: string; fix: string | null } | null;
+  /** Sync is set up, so keys go to your other devices. */
+  synced: boolean;
+  folder: string;
+}
+
+export type KeyType = "ed25519" | "rsa";
+
+/** `key:NAME` → `NAME`. */
+export function savedKeyName(identity?: string | null): string | null {
+  return identity?.startsWith("key:") ? identity.slice(4) : null;
+}

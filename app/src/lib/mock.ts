@@ -3,7 +3,7 @@
 
 import { emitLocal, type OutputSink } from "./api";
 import { platform } from "./platform";
-import type { Bookmark, Entry, FolderInfo, Library, Param, RunInfo, RunRecord, Settings, Step } from "./types";
+import type { Bookmark, Entry, FolderInfo, Library, Param, RunInfo, RunRecord, Settings, SshKey, Step } from "./types";
 
 const GLOBAL = "~/.config/bk/bookmarks.toml";
 const PROJECT = "~/work/fastcap/.bk.toml";
@@ -212,6 +212,44 @@ function library(): Library {
 
 // ---- fake runs ----
 const runs = new Map<string, { info: RunInfo; buf: string; sinks: Map<string, OutputSink> }>();
+/** Saved SSH keys (`?agent=off` previews a device without ssh-agent). */
+type MockKey = Omit<SshKey, "used_by" | "clash" | "file">;
+const agentOff = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("agent") === "off";
+const sshKeys: MockKey[] = [
+  { name: "github", kind: "ED25519", fingerprint: "SHA256:7Hq2mvR0c1pXk9sE4tYw8bZ3nLfA6uJdQ5oVg2iKx0M", comment: "you@MacBook-Pro", encrypted: false, unlocked: false,
+    public: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGl0aHViLWZha2Uta2V5LWZvci10aGUtcHJldmlldw you@MacBook-Pro" },
+  { name: "lab", kind: "ED25519", fingerprint: "SHA256:Lb4QeV1xR8sN2mK7cT0yHq9wZ3fJ6aPdU5oXg1iEk2Y", comment: "you@MacBook-Pro", encrypted: true, unlocked: !agentOff,
+    public: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxhYi1mYWtlLWtleS1mb3ItdGhlLXByZXZpZXctb25seQ you@MacBook-Pro" },
+];
+let gpuIdentity = "key:lab";
+
+function fakeFingerprint(): string {
+  const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  return `SHA256:${Array.from({ length: 43 }, () => abc[Math.floor(Math.random() * abc.length)]).join("")}`;
+}
+
+/** A key task's tab: OpenSSH's prompts (answered by itself), then `done`. */
+function startFakeTask(name: string, label: string, lines: string[], done: () => string | null): RunInfo {
+  const runId = `run-${++runCounter}`;
+  const info: RunInfo = {
+    id: runId, kind: "task", server: null, tmux: null, reattached: false, forwards: [], name, entry_id: "",
+    status: "running", exit_code: null, started_ms: Date.now(), ended_ms: null, step: 0, total_steps: 0, step_label: "",
+    cwd: label, env_label: label, params: {}, background: false,
+  };
+  runs.set(runId, { info, buf: "", sinks: new Map() });
+  let t = 0;
+  lines.forEach((l) => setTimeout(() => push(runId, `${l}\r\n`), (t += 350)));
+  setTimeout(() => {
+    const said = done();
+    if (said) push(runId, `\r\n${said}\r\n`);
+    push(runId, `\r\n\x1b[32m✓ done in 1.4s\x1b[0m\r\n`);
+    Object.assign(info, { status: "succeeded", exit_code: 0, ended_ms: Date.now() });
+    emitLocal("run-updated", { ...info });
+  }, t + 600);
+  setTimeout(() => emitLocal("run-updated", { ...info }), 0);
+  return { ...info };
+}
+
 let runCounter = 0;
 const enc = new TextEncoder();
 
@@ -506,14 +544,16 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
       return [
         { name: "gpu", source: "clibooker", destination: "ubuntu@10.0.0.5", description: "Lab A100", bookmarks: 1, scanned_ms: now - 3600_000,
           status: { state: "reachable", ms: 42 },
-          server: { host: "10.0.0.5", user: "ubuntu", identity: "~/.ssh/lab_ed25519", forward: ["8888:127.0.0.1:8888"], description: "Lab A100" } },
+          server: { host: "10.0.0.5", user: "ubuntu", identity: gpuIdentity, forward: ["8888:127.0.0.1:8888"], description: "Lab A100" } },
         { name: "staging", source: "clibooker", destination: "deploy@staging.example.com:2222", description: null, bookmarks: 0, scanned_ms: null,
           status: { state: "unknown-host-key" }, server: { host: "staging.example.com", user: "deploy", port: 2222, jump: "gpu" } },
         { name: "orb", source: "ssh-config", destination: "orb", description: "from ~/.ssh/config", bookmarks: 0, scanned_ms: null, status: null, server: null },
         { name: "203.0.113.10", source: "ssh-config", destination: "203.0.113.10", description: "from ~/.ssh/config", bookmarks: 0, scanned_ms: null, status: null, server: null },
       ].filter((s) => !deletedServers.has(s.name) && !settings.hidden_servers?.includes(s.name));
     case "check_server":
-      return args.name === "staging" ? { state: "unknown-host-key" } : { state: "reachable", ms: 38 };
+      if (args.name === "staging") return { state: "unknown-host-key" };
+      // `?auth` previews a server that wants a password or a key.
+      return new URLSearchParams(window.location.search).has("auth") ? { state: "auth-required" } : { state: "reachable", ms: 38 };
     case "server_inventory":
       return {
         probed_ms: now - 3600_000, os: "Linux x86_64", shell: "/bin/bash", home: "/home/ubuntu",
@@ -531,6 +571,84 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
     case "connect_server":
     case "shell_here":
       return startFakeRun(`${GLOBAL}#train`, {});
+    case "keys_list":
+      return {
+        keys: sshKeys.map((k) => ({ ...k, used_by: gpuIdentity === `key:${k.name}` ? ["gpu"] : [], clash: false, file: `~/.local/share/bk/keys/${k.name}` })),
+        no_agent: agentOff
+          ? mockPlatform === "windows"
+            ? { why: "the OpenSSH Authentication Agent service isn't running", fix: "Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent" }
+            : { why: "ssh-agent isn't running here (SSH_AUTH_SOCK isn't set)", fix: null }
+          : null,
+        synced: !!syncState,
+        folder: mockPlatform === "windows" ? "~\\AppData\\Local\\bk\\keys" : "~/.local/share/bk/keys",
+      };
+    case "keys_suggest_name": {
+      const file = String(args.path).split(/[\\/]/).pop() ?? "key";
+      const base = file.startsWith("id_") ? `${thisDevice}-${file.slice(3)}` : file.replace(/\.(pem|key)$/, "");
+      return base.toLowerCase().replace(/[^a-z0-9_]+/g, "-").replace(/^-+|-+$/g, "") || "key";
+    }
+    case "keys_import": {
+      const name = String(args.name);
+      if (sshKeys.some((k) => k.name === name)) throw new Error(`a key named \`${name}\` is already saved`);
+      const k: MockKey = { name, kind: "ED25519", fingerprint: fakeFingerprint(), comment: "you@desktop-pc", encrypted: !args.text, unlocked: false,
+        public: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGltcG9ydGVkLWZha2Uta2V5 you@desktop-pc" };
+      sshKeys.push(k);
+      return k;
+    }
+    case "keys_rename": {
+      const k = sshKeys.find((x) => x.name === args.from);
+      if (k) k.name = String(args.to);
+      if (gpuIdentity === `key:${args.from}`) {
+        gpuIdentity = `key:${args.to}`;
+        return ["gpu"];
+      }
+      return [];
+    }
+    case "keys_remove": {
+      const i = sshKeys.findIndex((k) => k.name === args.name);
+      if (i >= 0) sshKeys.splice(i, 1);
+      return null;
+    }
+    case "keys_lock": {
+      const k = sshKeys.find((x) => x.name === args.name);
+      if (k) k.unlocked = false;
+      return null;
+    }
+    case "keys_generate": {
+      const name = String(args.name);
+      const lines = args.passphrase
+        ? ["Enter passphrase for \"" + name + "\" (empty for no passphrase): ", "Enter same passphrase again: "]
+        : [];
+      return startFakeTask(`New key ${name}`, "ssh-keygen", lines, () => {
+        const encrypted = Boolean(args.passphrase);
+        sshKeys.push({ name, kind: args.kind === "rsa" ? "RSA 4096" : "ED25519", fingerprint: fakeFingerprint(), comment: String(args.comment ?? "you@MacBook-Pro"),
+          encrypted, unlocked: false, public: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG5ldy1mYWtlLWtleQ you@MacBook-Pro" });
+        return `\x1b[32m✓ saved key ${name}\x1b[0m \x1b[2m(ED25519)\x1b[0m`;
+      });
+    }
+    case "keys_unlock": {
+      const name = String(args.name);
+      return startFakeTask(`Unlock ${name}`, "ssh-add", [`Enter passphrase for ${name}: `, `Identity added: ${name}`], () => {
+        const k = sshKeys.find((x) => x.name === name);
+        if (k) k.unlocked = true;
+        return "\x1b[32m✓ unlocked: you won't be asked for its passphrase again\x1b[0m";
+      });
+    }
+    case "keys_passphrase": {
+      const name = String(args.name);
+      return startFakeTask(`Passphrase for ${name}`, "ssh-keygen", ["Enter new passphrase (empty for no passphrase): ", "Enter same passphrase again: ", "Your identification has been saved with the new passphrase."], () => {
+        const k = sshKeys.find((x) => x.name === name);
+        if (k) k.encrypted = true;
+        return null;
+      });
+    }
+    case "keys_install": {
+      const [name, server] = [String(args.name), String(args.server)];
+      return startFakeTask(`Install ${name} on ${server}`, `ssh ${server}`, [`ubuntu@10.0.0.5's password: `, "bk: added the key to ~/.ssh/authorized_keys on lab-a100"], () => {
+        if (server === "gpu") gpuIdentity = `key:${name}`;
+        return `\x1b[32m✓ ${server} now uses key ${name}\x1b[0m\r\n\x1b[32m✓ logs in with the key\x1b[0m`;
+      });
+    }
     case "cli_status":
       return { on_path: null, bundled: "/Applications/Clibooker.app/Contents/MacOS/bk", link: "~/.local/bin/bk", linked: false, link_dir_on_path: true };
     case "install_cli":
