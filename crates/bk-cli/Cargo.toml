@@ -22,7 +22,7 @@ tempfile = "3.27.0"
 libc = "0.2.190"
 
 [dev-dependencies]
-bk-core = { path = "../bk-core", features = ["fake-telegram"] }
+bk-core = { path = "../bk-core", features = ["fake-telegram", "fake-releases"] }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"

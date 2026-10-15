@@ -13,6 +13,7 @@ mod state;
 mod sync_cmds;
 mod tray;
 mod tunnels;
+mod updater;
 mod watcher;
 
 use std::sync::Arc;
@@ -26,6 +27,11 @@ use watcher::FileWatcher;
 
 /// Set once the user confirmed quitting while runs are active.
 static QUIT_CONFIRMED: AtomicBool = AtomicBool::new(false);
+
+/// Quitting is settled (an update is restarting the app): don't ask about runs.
+pub fn confirm_quit() {
+    QUIT_CONFIRMED.store(true, Ordering::SeqCst);
+}
 
 /// Quit, asking first if runs are still going.
 pub fn request_quit(app: &AppHandle) {
@@ -79,6 +85,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .plugin(palette::plugin())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -102,6 +109,8 @@ pub fn run() {
             }
 
             autosync::start(app.handle());
+            updater::start(app.handle());
+            commands::refresh_cli_copy(&state);
 
             if let Err(e) = tray::create(app.handle()) {
                 eprintln!("no tray icon ({e}); closing the window will quit");
@@ -215,6 +224,9 @@ pub fn run() {
             palette::palette_run,
             palette::palette_connect,
             palette::set_dock_visible,
+            updater::update_status,
+            updater::update_check,
+            updater::update_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Clibooker");
@@ -222,8 +234,9 @@ pub fn run() {
     app.run(|app, event| match event {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => palette::show_main(app),
-        RunEvent::ExitRequested { api, .. } => {
-            if !QUIT_CONFIRMED.load(Ordering::SeqCst) && app.state::<AppState>().runs.any_running() {
+        RunEvent::ExitRequested { api, code, .. } => {
+            let restarting = code == Some(tauri::RESTART_EXIT_CODE);
+            if !restarting && !QUIT_CONFIRMED.load(Ordering::SeqCst) && app.state::<AppState>().runs.any_running() {
                 api.prevent_exit();
                 request_quit(app);
             } else {

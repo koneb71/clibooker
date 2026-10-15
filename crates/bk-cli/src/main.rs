@@ -8,6 +8,7 @@ mod manage;
 mod remote_cmds;
 mod shellcmds;
 mod sync_cmds;
+mod update_cmds;
 
 use std::process::ExitCode;
 
@@ -35,6 +36,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<i32> {
     match &cmd {
         Some(Cmd::Init { shell, record }) => return shellcmds::init(*shell, *record),
         Some(Cmd::App) => return manage::app(),
+        Some(Cmd::Update { check }) => return update_cmds::update(*check),
         Some(Cmd::RunSteps { file }) => return exec::run_steps_file(file),
         _ => {}
     }
@@ -71,7 +73,7 @@ fn run(ctx: &commands::Ctx, cmd: Option<Cmd>) -> anyhow::Result<i32> {
         Some(Cmd::Keys { cmd }) => keys_cmds::keys(ctx, cmd),
         Some(Cmd::Ssh { server, command }) => remote_cmds::ssh(ctx, &server, &command),
         Some(Cmd::Sync { cmd, background }) => sync_cmds::sync(ctx, cmd, background),
-        Some(Cmd::Init { .. } | Cmd::App | Cmd::RunSteps { .. }) => unreachable!("handled above"),
+        Some(Cmd::Init { .. } | Cmd::App | Cmd::RunSteps { .. } | Cmd::Update { .. }) => unreachable!("handled above"),
         Some(Cmd::External(args)) => {
             // `bk train k=v -- extra` → `bk run train k=v -- extra`
             let argv = ["bk", "run"].into_iter().map(String::from).chain(args);

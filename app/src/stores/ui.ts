@@ -89,3 +89,9 @@ export const useUi = create<UiState>((set, get) => ({
   askRemoveServer: (removingServer) => set({ removingServer }),
   setDirty: (dirty) => set({ dirty }),
 }));
+
+/** Settings → Updates (from the sidebar, the tray or a toast). */
+export function showUpdates() {
+  useUi.getState().setView("settings");
+  setTimeout(() => document.getElementById("updates")?.scrollIntoView({ behavior: "smooth", block: "center" }), 120);
+}

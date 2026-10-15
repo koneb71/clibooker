@@ -13,10 +13,10 @@ import { api, on, pickFolder } from "./lib/api";
 import { isMac, isMod, kbd } from "./lib/platform";
 import { keys, useBackendInvalidation, useEntry, useLibrary } from "./lib/queries";
 import { requestRun } from "./lib/run";
-import type { RunInfo, SyncEvent } from "./lib/types";
+import type { RunInfo, SyncEvent, UpdateStatus } from "./lib/types";
 import { useRuns } from "./stores/runs";
 import { useTheme } from "./stores/theme";
-import { useUi } from "./stores/ui";
+import { showUpdates, useUi } from "./stores/ui";
 import { DoctorView, HistoryView, InboxView } from "./views/ActivityViews";
 import { RemoveServerDialog, ServerView } from "./views/ServerView";
 import { SettingsView } from "./views/SettingsView";
@@ -103,6 +103,14 @@ export function MainApp() {
         requestRun(e, params ? { params } : undefined);
       }),
       on<string>("request-connect", (name) => void useRuns.getState().connect(name)),
+      on<UpdateStatus>("update-available", (st) =>
+        toast(`Clibooker ${st.available?.version} is available`, {
+          description: st.can_install ? "It installs and restarts in a moment." : "Download it from the releases page.",
+          action: { label: "See update", onClick: showUpdates },
+          duration: 12_000,
+        }),
+      ),
+      on("show-updates", showUpdates),
       on<string | null>("shell-env-ready", (err) => {
         if (err) toast.warning("Couldn't read your login shell environment", { description: err });
       }),

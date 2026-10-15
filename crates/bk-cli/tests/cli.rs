@@ -527,3 +527,52 @@ fn saved_ssh_keys() {
     s.bk().arg("doctor").assert().stderr(contains("saved key `lab`, which isn't on this device"));
     s.bk().args(["add", "keys", "ls"]).assert().failure().stderr(contains("subcommand"));
 }
+
+/// `bk update` against a local release server: a standalone bk replaces itself with the
+/// signed release; one that came with the app is left alone and says how to update it.
+#[test]
+fn update_replaces_a_standalone_bk() {
+    use bk_core::update::{TARGET, Version, fake::FakeReleases};
+    let releases = FakeReleases::start(&Version::new(9, 9, 9), TARGET, b"#!/bin/sh\necho \"bk 9.9.9\"\n");
+    let d = tempfile::tempdir().unwrap();
+    let run = |exe: &Path, args: &[&str]| {
+        let mut c = Command::new(exe);
+        c.args(args)
+            .env("BK_RELEASES_URL", releases.url())
+            .env("BK_RELEASE_KEY", releases.public_key())
+            .env("BK_CONFIG", d.path().join("cfg.toml"))
+            .env("BK_DATA_DIR", d.path().join("data"))
+            .env("NO_COLOR", "1");
+        c
+    };
+    let alone = d.path().join("bin/bk");
+    std::fs::create_dir_all(alone.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_bk"), &alone).unwrap();
+    run(&alone, &["update", "--check"])
+        .assert()
+        .success()
+        .stderr(contains("bk 9.9.9 is out").and(contains("bk update")));
+    run(&alone, &["update"]).assert().success().stderr(contains("→ 9.9.9"));
+    let out = StdCommand::new(&alone).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "bk 9.9.9\n", "the new bk runs");
+
+    // The app's own copy (a Clibooker binary next to it) isn't replaced.
+    let app = d.path().join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("Clibooker"), "").unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_bk"), app.join("bk")).unwrap();
+    run(&app.join("bk"), &["update"]).assert().code(1).stderr(contains("comes with the Clibooker app"));
+    assert_eq!(std::fs::read(app.join("bk")).unwrap(), std::fs::read(env!("CARGO_BIN_EXE_bk")).unwrap());
+
+    // A release signed with another key is refused.
+    let other = FakeReleases::start(&Version::new(9, 9, 9), TARGET, b"evil");
+    let copy = d.path().join("bin2/bk");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_bk"), &copy).unwrap();
+    run(&copy, &["update"])
+        .env("BK_RELEASES_URL", other.url())
+        .assert()
+        .failure()
+        .stderr(contains("isn't signed with Clibooker's release key"));
+    assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(env!("CARGO_BIN_EXE_bk")).unwrap());
+}

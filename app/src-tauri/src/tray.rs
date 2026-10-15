@@ -116,6 +116,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
 
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
+    if let Some(version) = crate::updater::available(app) {
+        let label = format!("Update to {version}…");
+        items.push(Box::new(MenuItem::with_id(app, "update", label, true, None::<&str>)?));
+    }
     if bk_core::sync::SyncConfig::load(&app.state::<AppState>().paths).is_some() {
         items.push(Box::new(MenuItem::with_id(app, "sync", "Sync Now", true, None::<&str>)?));
     }
@@ -130,6 +134,10 @@ fn handle(app: &AppHandle, id: &str) {
         "palette" => palette::toggle(app),
         "quit" => crate::request_quit(app),
         "sync" => crate::sync_cmds::sync_from_tray(app),
+        "update" => {
+            palette::show_main(app);
+            let _ = app.emit_to("main", "show-updates", ());
+        }
         _ => {
             if let Some(entry_id) = id.strip_prefix("run:") {
                 palette::request_run(app, entry_id.to_string(), None);

@@ -250,6 +250,24 @@ function startFakeTask(name: string, label: string, lines: string[], done: () =>
   return { ...info };
 }
 
+/** `?update` previews a newer release (`?update=download`: one this copy can't install itself). */
+const updateParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("update") : null;
+let lastUpdateCheck: number | null = now - 25 * 60_000;
+function updateStatus(installing = false) {
+  return {
+    current: "0.3.0",
+    available: updateParam !== null ? { version: "0.4.0", date: new Date(now - 3600_000).toISOString() } : null,
+    can_install: updateParam !== "download",
+    bundle: mockPlatform === "linux" ? "deb" : mockPlatform === "windows" ? "nsis" : "app",
+    checking: false,
+    installing,
+    last_checked_ms: lastUpdateCheck,
+    error: null,
+    auto: settings.check_updates ?? true,
+    releases_url: "https://github.com/koneb71/clibooker/releases/latest",
+  };
+}
+
 let runCounter = 0;
 const enc = new TextEncoder();
 
@@ -648,6 +666,19 @@ export async function mockCall(cmd: string, args: Record<string, unknown> = {}):
         if (server === "gpu") gpuIdentity = `key:${name}`;
         return `\x1b[32m✓ ${server} now uses key ${name}\x1b[0m\r\n\x1b[32m✓ logs in with the key\x1b[0m`;
       });
+    }
+    case "update_status":
+      return updateStatus();
+    case "update_check":
+      lastUpdateCheck = Date.now();
+      return updateStatus();
+    case "update_install": {
+      emitLocal("update-status", updateStatus(true));
+      const total = 9_400_000;
+      for (let i = 1; i <= 10; i++) setTimeout(() => emitLocal("update-progress", [(total * i) / 10, total]), i * 250);
+      await new Promise((r) => setTimeout(r, 3200));
+      emitLocal("update-status", updateStatus());
+      return null;
     }
     case "cli_status":
       return { on_path: null, bundled: "/Applications/Clibooker.app/Contents/MacOS/bk", link: "~/.local/bin/bk", linked: false, link_dir_on_path: true };

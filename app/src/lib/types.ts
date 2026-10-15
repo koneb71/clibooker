@@ -143,6 +143,8 @@ export interface Settings {
   ssh?: string;
   /** Keep running in the menu bar / tray when the window closes (default true). */
   keep_running?: boolean;
+  /** The app looks for updates by itself (default true; per device). */
+  check_updates?: boolean;
   /** ~/.ssh/config hosts left out of the server lists (they still work by name). */
   hidden_servers?: string[];
 }
@@ -463,4 +465,21 @@ export type KeyType = "ed25519" | "rsa";
 /** `key:NAME` → `NAME`. */
 export function savedKeyName(identity?: string | null): string | null {
   return identity?.startsWith("key:") ? identity.slice(4) : null;
+}
+
+/** The app's own updates. */
+export interface UpdateStatus {
+  current: string;
+  available: { version: string; date: string | null } | null;
+  /** This install can update itself (otherwise: download the new version). */
+  can_install: boolean;
+  /** How it was installed. */
+  bundle: "app" | "nsis" | "msi" | "appimage" | "deb" | "rpm" | null;
+  checking: boolean;
+  installing: boolean;
+  last_checked_ms: number | null;
+  error: string | null;
+  auto: boolean;
+  /** The latest release's page. */
+  releases_url: string;
 }

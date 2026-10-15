@@ -22,6 +22,7 @@ pub mod store;
 pub mod sync;
 pub mod template;
 pub mod trust;
+pub mod update;
 
 pub use model::{Bookmark, EnvSpec, Os, OsVariant, Server, Settings, Step};
 pub use paths::Paths;

@@ -138,6 +138,11 @@ pub enum Cmd {
         #[arg(long, hide = true)]
         background: bool,
     },
+    /// Update bk to the newest release (`--check` only says whether there is one)
+    Update {
+        #[arg(long)]
+        check: bool,
+    },
     /// Open the Clibooker desktop app
     App,
     /// Run a steps file for the desktop app (internal)

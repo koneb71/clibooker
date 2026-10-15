@@ -1,8 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
+  ArrowUpCircle,
   CheckCircle2,
   Copy,
+  Download,
   ExternalLink,
   FolderGit2,
   FolderInput,
@@ -24,18 +26,19 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { api, copyText, inTauri, pickFolder } from "../lib/api";
-import { keys, useInventory, useKeys, useLibrary } from "../lib/queries";
+import { api, copyText, inTauri, on, pickFolder } from "../lib/api";
+import { keys, useInventory, useKeys, useLibrary, useUpdates } from "../lib/queries";
 import { computerNoun, contractHome, isLinux, isMac, isWindows, kbd, platform, shellOptions, shellSetup, trayName } from "../lib/platform";
 import type { Settings, SshKey, SyncContact } from "../lib/types";
 import { cn, keyNameError, relativeTime } from "../lib/utils";
+import { useRuns } from "../stores/runs";
 import { useTheme } from "../stores/theme";
 import { Button, Dialog, Field, IconButton, Input, Select, Switch } from "../components/ui";
 import { ImportKeyDialog, KeyFacts, NewKeyDialog, useKeyTask } from "../components/Keys";
 
-function Group({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
+function Group({ id, title, description, children }: { id?: string; title: string; description?: ReactNode; children: ReactNode }) {
   return (
-    <section className="grid grid-cols-[200px_minmax(0,1fr)] gap-6 border-b border-line py-6 last:border-b-0">
+    <section id={id} className="grid grid-cols-[200px_minmax(0,1fr)] gap-6 border-b border-line py-6 last:border-b-0">
       <div>
         <h2 className="text-[13px] font-semibold">{title}</h2>
         {description && <p className="mt-1 text-xs leading-relaxed text-muted">{description}</p>}
@@ -351,6 +354,8 @@ export function SettingsView() {
             )}
           </Group>
 
+          <UpdatesGroup checkUpdates={s.check_updates ?? true} onAuto={(check_updates) => void save({ check_updates })} />
+
           <SyncGroup />
 
           <KeysGroup />
@@ -530,6 +535,144 @@ function FoldersGroup() {
           Add
         </Button>
       </div>
+    </Group>
+  );
+}
+
+function megabytes(bytes: number): string {
+  return (bytes / 1_000_000).toFixed(1);
+}
+
+/** The app's own updates: what's installed, what's out, and installing it. */
+function UpdatesGroup({ checkUpdates, onAuto }: { checkUpdates: boolean; onAuto: (on: boolean) => void }) {
+  const { data: st } = useUpdates();
+  const qc = useQueryClient();
+  const running = useRuns((r) => Object.values(r.runs).filter((x) => x.status === "running").length);
+  const [progress, setProgress] = useState<[number, number | null] | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => on<[number, number | null]>("update-progress", setProgress), []);
+  if (!st) return null;
+  const next = st.available;
+
+  const check = async () => {
+    try {
+      const fresh = await api.updateCheck();
+      qc.setQueryData(["update"], fresh);
+      if (!fresh.available && !fresh.error) toast.success(`Clibooker ${fresh.current} is the newest`);
+    } catch (e) {
+      toast.error("Couldn't check for updates", { description: String(e) });
+    }
+  };
+  const install = async () => {
+    setConfirming(false);
+    setProgress(null);
+    try {
+      await api.updateInstall();
+    } catch (e) {
+      toast.error("Couldn't update", { description: String(e) });
+    }
+  };
+  const [got, total] = progress ?? [0, null];
+  const line = st.checking
+    ? "Checking…"
+    : st.error
+      ? `Couldn't check: ${st.error}`
+      : st.last_checked_ms
+        ? `Up to date · checked ${relativeTime(st.last_checked_ms)}`
+        : "Up to date";
+
+  return (
+    <Group
+      id="updates"
+      title="Updates"
+      description="Releases are signed, and Clibooker only installs one signed with its release key."
+    >
+      <div className={cn("flex items-center gap-3 rounded-lg border px-4 py-3", next ? "border-accent/40 bg-accent-soft" : "border-line bg-panel")}>
+        <ArrowUpCircle size={18} className={cn("shrink-0", next ? "text-accent" : "text-faint")} />
+        <div className="flex min-w-0 flex-1 flex-col">
+          {next ? (
+            <>
+              <span className="text-[13px] font-medium text-fg">Clibooker {next.version} is available</span>
+              <span className="text-xs text-muted">
+                You have {st.current} ·{" "}
+                <button className="text-accent hover:underline" onClick={() => openLink(st.releases_url)}>
+                  What's new
+                </button>
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="text-[13px] font-medium text-fg">Clibooker {st.current}</span>
+              <span className={cn("truncate text-xs", st.error ? "text-warn" : "text-muted")} title={st.error ?? undefined}>
+                {line}
+              </span>
+            </>
+          )}
+        </div>
+        {next && st.can_install ? (
+          <Button variant="primary" disabled={st.installing} onClick={() => (running ? setConfirming(true) : void install())}>
+            {st.installing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+            {st.installing ? "Updating…" : "Update and restart"}
+          </Button>
+        ) : next ? (
+          <Button onClick={() => openLink(st.releases_url)}>
+            <ExternalLink size={13} /> Download
+          </Button>
+        ) : (
+          <Button disabled={st.checking} onClick={() => void check()}>
+            <RefreshCw size={13} className={cn(st.checking && "animate-spin")} /> Check now
+          </Button>
+        )}
+      </div>
+      {st.installing && (
+        <div className="flex flex-col gap-1">
+          <div className="h-1.5 overflow-hidden rounded-full bg-line">
+            <div
+              className={cn("h-full rounded-full bg-accent transition-[width]", !total && "w-1/3 animate-pulse")}
+              style={total ? { width: `${Math.min(100, (got / total) * 100)}%` } : undefined}
+            />
+          </div>
+          <span className="text-xs text-muted">
+            {total && got >= total
+              ? "Installing…"
+              : `Downloading${total ? ` ${megabytes(got)} of ${megabytes(total)} MB` : "…"}`}
+          </span>
+        </div>
+      )}
+      {next && st.error && <p className="text-xs text-err">{st.error}</p>}
+      {next && st.can_install && (st.bundle === "deb" || st.bundle === "rpm") && (
+        <p className="text-xs text-muted">Installing the package asks for your password.</p>
+      )}
+      {next && !st.can_install && (
+        <p className="text-xs text-muted">
+          This copy can't update itself
+          {isMac ? " (it runs from where it was downloaded: move Clibooker to Applications)" : ""}. Download the new version and
+          install it over this one.
+        </p>
+      )}
+      <Switch
+        checked={checkUpdates}
+        onChange={onAuto}
+        label="Check for updates automatically"
+        hint="When Clibooker starts, then every few hours. Updates install only when you say so."
+      />
+      {confirming && (
+        <Dialog
+          open
+          onOpenChange={(o) => !o && setConfirming(false)}
+          title="Update and restart?"
+          description={`${running} run${running === 1 ? " is" : "s are"} going here and will stop. Runs kept going on a server (tmux) carry on.`}
+        >
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setConfirming(false)}>
+              Later
+            </Button>
+            <Button variant="primary" onClick={() => void install()}>
+              Stop runs and update
+            </Button>
+          </div>
+        </Dialog>
+      )}
     </Group>
   );
 }

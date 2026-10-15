@@ -46,6 +46,7 @@ pub const RESERVED_NAMES: &[&str] = &[
     "ssh",
     "sync",
     "trust",
+    "update",
 ];
 
 pub fn validate_name(name: &str) -> Result<()> {

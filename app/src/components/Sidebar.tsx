@@ -1,13 +1,13 @@
-import { Bookmark, Clock, FolderGit2, Globe, Hash, History, Inbox, Layers, Plus, Server, Settings2, SquareTerminal, Stethoscope, Trash2 } from "lucide-react";
+import { ArrowUpCircle, Bookmark, Clock, FolderGit2, Globe, Hash, History, Inbox, Layers, Plus, Server, Settings2, SquareTerminal, Stethoscope, Trash2 } from "lucide-react";
 import { ContextMenu } from "radix-ui";
 import type { ReactNode } from "react";
-import { allTags, useLibrary, useServers, useServerStatus } from "../lib/queries";
+import { allTags, useLibrary, useServers, useServerStatus, useUpdates } from "../lib/queries";
 import type { ServerInfo } from "../lib/types";
 import { ReachDot } from "../views/ServerView";
 import { isMac } from "../lib/platform";
 import { cn } from "../lib/utils";
 import { useRuns } from "../stores/runs";
-import { type Filter, type View, useUi } from "../stores/ui";
+import { type Filter, showUpdates, type View, useUi } from "../stores/ui";
 
 function sameFilter(a: Filter, b: Filter) {
   if (a.kind !== b.kind) return false;
@@ -101,6 +101,7 @@ export function Sidebar({ onAddProject }: { onAddProject: () => void }) {
   const { data: lib } = useLibrary();
   const { data: servers } = useServers();
   const { filter, view, setFilter, setView, selectedServer, selectServer } = useUi();
+  const { data: update } = useUpdates();
   const entries = (lib?.entries ?? []).filter((e) => !e.shadowed);
   const tags = allTags(lib);
   const inLibrary = view === "library";
@@ -197,6 +198,15 @@ export function Sidebar({ onAddProject }: { onAddProject: () => void }) {
         <Item icon={<Stethoscope size={15} />} label="Doctor" {...go("doctor")} />
       </div>
       <div className="shrink-0 px-2.5 pb-3">
+        {update?.available && (
+          <button
+            onClick={showUpdates}
+            className="mb-1 flex h-7 w-full items-center gap-2 rounded-md bg-accent-soft px-2 text-left text-[12.5px] font-medium text-accent transition-[filter] hover:brightness-95"
+          >
+            <ArrowUpCircle size={15} className="shrink-0" />
+            <span className="truncate">Update to {update.available.version}</span>
+          </button>
+        )}
         <Item icon={<Settings2 size={15} />} label="Settings" {...go("settings")} />
       </div>
     </nav>

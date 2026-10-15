@@ -492,6 +492,9 @@ pub struct Settings {
     /// Keep the app running in the menu bar / tray when its window is closed (default true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_running: Option<bool>,
+    /// The desktop app looks for updates by itself (default true). Kept per device: it isn't synced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_updates: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_font_size: Option<u16>,
     /// ssh binary (default /usr/bin/ssh, which understands macOS `UseKeychain`).

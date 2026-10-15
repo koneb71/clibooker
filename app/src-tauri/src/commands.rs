@@ -605,6 +605,21 @@ fn copied_marker(state: &AppState) -> PathBuf {
     state.paths.data_dir.join("bk-cli-copy")
 }
 
+/// An AppImage's `bk` was copied into `~/.local/bin` (its mount point changes each launch), so
+/// after the app updates, refresh that copy.
+pub fn refresh_cli_copy(state: &AppState) {
+    if !is_appimage() {
+        return;
+    }
+    let link = cli_link();
+    let ours = std::fs::read_to_string(copied_marker(state)).is_ok_and(|m| Path::new(m.trim()) == link);
+    if let (true, Some(src)) = (ours, bundled_cli())
+        && std::fs::read(&src).ok() != std::fs::read(&link).ok()
+    {
+        let _ = std::fs::copy(&src, &link);
+    }
+}
+
 #[tauri::command]
 pub fn cli_status(state: State<'_, AppState>) -> CliStatus {
     let env = state.base_env();

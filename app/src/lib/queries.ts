@@ -1,7 +1,7 @@
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { api, on } from "./api";
-import type { Entry, Library } from "./types";
+import type { Entry, Library, UpdateStatus } from "./types";
 
 export const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: 1 } },
@@ -69,6 +69,11 @@ export function useKeys() {
   return useQuery({ queryKey: ["keys"], queryFn: api.keysList, staleTime: 10_000 });
 }
 
+/** The app's updates (kept current by `update-status` events). */
+export function useUpdates() {
+  return useQuery({ queryKey: ["update"], queryFn: api.updateStatus, staleTime: Infinity });
+}
+
 export function useHistory(name?: string, limit = 300) {
   return useQuery({ queryKey: keys.history(name), queryFn: () => api.getHistory(limit, name) });
 }
@@ -97,6 +102,7 @@ export function useBackendInvalidation() {
         queryClient.invalidateQueries({ queryKey: ["history"] });
         queryClient.invalidateQueries({ queryKey: keys.library });
       }),
+      on<UpdateStatus>("update-status", (status) => queryClient.setQueryData(["update"], status)),
       on("shell-env-ready", () => {
         queryClient.invalidateQueries({ queryKey: keys.inventory });
         queryClient.invalidateQueries({ queryKey: ["scan"] });

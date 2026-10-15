@@ -265,6 +265,18 @@ pub fn doctor(ctx: &Ctx) -> Result<i32> {
             }
         }
     }
+    // Silent when offline: doctor is about this machine.
+    if let Ok(latest) = bk_core::update::latest(std::time::Duration::from_secs(3)) {
+        let current = bk_core::update::current();
+        if latest > current {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let how = crate::update_cmds::elsewhere(bk_core::update::install_kind(&exe))
+                .unwrap_or_else(|| "run `bk update`".into());
+            warn(&format!("bk {latest} is out (this is {current}); {how}"));
+        } else {
+            ok(&format!("bk {current} is the newest"));
+        }
+    }
     if let Some(pf) = &ctx.project_file {
         if trust::is_trusted(&ctx.paths, pf) {
             ok(&format!("project file {} is trusted", paths::contract_tilde(pf)));

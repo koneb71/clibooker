@@ -1,6 +1,6 @@
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Bookmark, CliStatus, DoctorReport, FolderRule, FolderScan, Inventory, KeysInfo, KeyType, Library, LocateResult, Preview, Reach, RecentCommand, RemoteFolder, RemoteInventory, RunInfo, RunRecord, ScriptScan, Server, ServerInfo, Settings, SshKey, SyncContact, SyncResult, SyncStatus } from "./types";
+import type { Bookmark, CliStatus, DoctorReport, FolderRule, FolderScan, Inventory, KeysInfo, KeyType, Library, LocateResult, Preview, Reach, RecentCommand, RemoteFolder, RemoteInventory, RunInfo, RunRecord, ScriptScan, Server, ServerInfo, Settings, SshKey, SyncContact, SyncResult, SyncStatus, UpdateStatus } from "./types";
 
 export const inTauri = isTauri();
 
@@ -131,6 +131,10 @@ export const api = {
   keysPassphrase: (name: string, cols: number, rows: number) => call<RunInfo>("keys_passphrase", { name, cols, rows }),
   keysInstall: (name: string, server: string, cols: number, rows: number) =>
     call<RunInfo>("keys_install", { name, server, cols, rows }),
+  updateStatus: () => call<UpdateStatus>("update_status"),
+  updateCheck: () => call<UpdateStatus>("update_check"),
+  /** Downloads (reporting `update-progress`), installs, and restarts the app. */
+  updateInstall: () => call<void>("update_install"),
   installCli: () => call<string>("install_cli"),
   runDoctor: () => call<DoctorReport>("run_doctor"),
   getInbox: (limit: number) => call<RecentCommand[]>("get_inbox", { limit }),

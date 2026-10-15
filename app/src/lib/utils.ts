@@ -88,7 +88,7 @@ export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 export const RESERVED = new Set([
   "add", "app", "completions", "doctor", "edit", "export", "folders", "go", "help", "history", "import", "init",
   "keys", "list", "locate", "ls", "mv", "pick", "remove", "rename", "rm", "run", "save", "scan", "server", "servers",
-  "settings", "show", "ssh", "sync", "trust",
+  "settings", "show", "ssh", "sync", "trust", "update",
 ]);
 
 /** Saved SSH key names: the same file name on every OS (lowercase, no dots). */

@@ -10,6 +10,8 @@ authors.workspace = true
 [features]
 # The in-process fake Telegram Bot API, for other crates' tests.
 fake-telegram = []
+# A local stand-in for GitHub releases, signed with a key of its own, for other crates' tests.
+fake-releases = ["dep:minisign"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -22,17 +24,24 @@ flate2 = "1.1.10"
 gethostname = "1.1.0"
 getrandom = "0.3"
 jiff = "0.2.38"
+minisign = { version = "0.10.0", optional = true }
+minisign-verify = "0.3"
 regex = "1.13.1"
+self-replace = "1.5.0"
+semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
 shell-escape = "0.1.5"
+tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 toml = "1.1.8"
 toml_edit = "0.25.17"
 ureq = "3"
 which = "8.0.6"
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
+minisign = "0.10.0"
 tempfile = "3.27.0"
