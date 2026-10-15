@@ -1,7 +1,7 @@
 [package]
 default-run = "bk"
 name = "bk-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "bk: bookmark shell commands with their folder, Python env and runtimes"
 license.workspace = true
@@ -10,7 +10,7 @@ authors.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-bk-core = { version = "0.2.0", path = "../bk-core" }
+bk-core = { version = "0.3.0", path = "../bk-core" }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 console = "0.16.6"
 ctrlc = "3.5.2"
