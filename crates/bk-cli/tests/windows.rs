@@ -154,3 +154,22 @@ fn bookmarks_from_another_os() {
     let project = std::fs::read_to_string(s.path().join(".bk.toml")).unwrap();
     assert!(project.contains("cwd = \"web/app\""), "{project}");
 }
+
+/// Saved SSH keys with Windows' own OpenSSH: made in Clibooker's folder, and accepted by
+/// ssh-keygen, which checks the file's permissions the way ssh does.
+#[test]
+fn saved_ssh_keys_with_windows_openssh() {
+    let keygen = bk_core::keys::tool(&bk_core::servers::ssh_program(None), "ssh-keygen");
+    if std::process::Command::new(&keygen).arg("-?").output().is_err() {
+        eprintln!("skipping: no ssh-keygen");
+        return;
+    }
+    let s = Sandbox::new();
+    s.bk().args(["keys", "new", "win", "--no-passphrase"]).assert().success().stderr(contains("saved key win"));
+    s.bk().arg("keys").assert().success().stdout(contains("win").and(contains("ED25519")));
+    let key = s.path().join("data").join("keys").join("win");
+    let out = std::process::Command::new(&keygen).args(["-y", "-P", "", "-f"]).arg(&key).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    s.bk().args(["server", "add", "w", "me@example.com", "-i", "key:win"]).assert().success();
+    s.bk().arg("keys").assert().success().stdout(contains("used by w"));
+}

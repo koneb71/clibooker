@@ -34,7 +34,9 @@ fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-fn start_sshd() -> Option<Sshd> {
+/// With `fake_home`, sessions get `HOME=<dir>/home`, and keys in its `.ssh/authorized_keys`
+/// log in too (so a test can install a key without touching this user's real one).
+fn start_sshd(fake_home: bool) -> Option<Sshd> {
     if !Path::new("/usr/sbin/sshd").exists() {
         eprintln!("skipping: no /usr/sbin/sshd");
         return None;
@@ -44,6 +46,15 @@ fn start_sshd() -> Option<Sshd> {
     keygen(&d.join("hostkey"));
     keygen(&d.join("client"));
     std::fs::copy(d.join("client.pub"), d.join("authorized_keys")).unwrap();
+    let (auth, env) = if fake_home {
+        std::fs::create_dir_all(d.join("home")).unwrap();
+        (
+            format!("{0}/authorized_keys {0}/home/.ssh/authorized_keys", d.display()),
+            format!(" HOME={}/home", d.display()),
+        )
+    } else {
+        (format!("{}/authorized_keys", d.display()), String::new())
+    };
     // Parallel tests can be handed the same free port; if another test's sshd got it, ours
     // exits at once while the port still answers. Check ours is alive, else try another port.
     let mut started = None;
@@ -52,10 +63,10 @@ fn start_sshd() -> Option<Sshd> {
         std::fs::write(
             d.join("sshd_config"),
             format!(
-                "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nAuthorizedKeysFile {d}/authorized_keys\n\
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hostkey\nAuthorizedKeysFile {auth}\n\
                  PidFile {d}/sshd.pid\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n\
                  PubkeyAuthentication yes\nAllowTcpForwarding yes\nPermitTTY yes\nLogLevel ERROR\n\
-                 SetEnv PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n",
+                 SetEnv PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin{env}\n",
                 d = d.display()
             ),
         )
@@ -106,7 +117,11 @@ struct Env {
 
 impl Env {
     fn new() -> Option<Self> {
-        let sshd = start_sshd()?;
+        Env::start(false)
+    }
+
+    fn start(fake_home: bool) -> Option<Self> {
+        let sshd = start_sshd(fake_home)?;
         let home = tempfile::tempdir().unwrap();
         let cfg = home.path().join("bookmarks.toml");
         std::fs::write(&cfg, format!("[settings]\nssh = \"{}\"\n", sshd.dir.path().join("ssh-wrapper").display()))
@@ -199,6 +214,45 @@ fn ssh_session_check_and_go() {
     e.bk().args(["add", "d", "-s", "dead", "true"]).assert().success();
     e.bk().arg("d").assert().code(255).stderr(contains("failed or the connection dropped"));
     e.bk().args(["servers", "--check"]).assert().success().stdout(contains("unreachable"));
+}
+
+/// Saved keys: a server logs in with one (`-i key:NAME`), and `bk keys install` puts a new one
+/// on a server, which then uses it.
+#[test]
+fn saved_keys_log_in_and_install() {
+    let Some(e) = Env::start(true) else { return };
+    let port = e.sshd.port.to_string();
+    let client = e.sshd.dir.path().join("client");
+    e.bk().args(["keys", "import"]).arg(&client).args(["--name", "client"]).assert().success();
+    e.bk().args(["server", "add", "k", "127.0.0.1", "-p", &port, "-i", "key:client"]).assert().success();
+    e.bk().args(["ssh", "k", "--", "echo", "with a saved key"]).assert().success().stdout(contains("with a saved key"));
+    e.bk().args(["keys"]).assert().success().stdout(contains("client").and(contains("used by k")));
+
+    // Installing writes to the server's ~/.ssh: make sure that's the test's, never this user's.
+    let home = e.sshd.dir.path().join("home");
+    let out = e.bk().args(["ssh", "t", "--", "sh", "-c", "echo $HOME"]).output().unwrap();
+    if String::from_utf8_lossy(&out.stdout).trim() != home.display().to_string() {
+        eprintln!("skipping the install: sshd didn't set the test's HOME");
+        return;
+    }
+    e.bk().args(["keys", "new", "fresh", "--no-passphrase"]).assert().success();
+    e.bk()
+        .args(["keys", "install", "fresh", "t"])
+        .assert()
+        .success()
+        .stdout(contains("added the key"))
+        .stderr(contains("t now uses key fresh").and(contains("logs in with the key")));
+    let authorized = std::fs::read_to_string(home.join(".ssh/authorized_keys")).unwrap();
+    assert_eq!(authorized.lines().count(), 1, "{authorized}");
+    let cfg = std::fs::read_to_string(e.home.path().join("bookmarks.toml")).unwrap();
+    assert!(cfg.contains("identity = \"key:fresh\""), "{cfg}");
+    e.bk().args(["ssh", "t", "--", "echo", "with the new key"]).assert().success().stdout(contains("with the new key"));
+
+    // Without the key on this device, ssh falls back to the agent and default keys (which
+    // this server doesn't take), and doctor says why.
+    e.bk().args(["keys", "rm", "fresh", "--yes"]).assert().success();
+    e.bk().args(["add", "on-t", "-s", "t", "true"]).assert().success();
+    e.bk().arg("doctor").assert().stderr(contains("saved key `fresh`, which isn't on this device"));
 }
 
 #[test]

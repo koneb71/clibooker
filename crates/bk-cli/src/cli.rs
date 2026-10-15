@@ -117,6 +117,11 @@ pub enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// SSH keys kept by Clibooker and synced between your devices (servers use them as `-i key:NAME`)
+    Keys {
+        #[command(subcommand)]
+        cmd: Option<KeysCmd>,
+    },
     /// Open an interactive SSH session to a server
     Ssh {
         /// Server name, ~/.ssh/config alias, or user@host[:port]
@@ -234,8 +239,8 @@ pub struct ServerAddArgs {
     pub destination: String,
     #[arg(short, long)]
     pub port: Option<u16>,
-    /// Private key file
-    #[arg(short, long, value_name = "FILE")]
+    /// Private key: a file, or a saved key as key:NAME (see `bk keys`)
+    #[arg(short, long, value_name = "FILE|key:NAME")]
     pub identity: Option<String>,
     /// Jump host (another server name or user@host[:port])
     #[arg(short = 'J', long, value_name = "HOST")]
@@ -275,6 +280,62 @@ pub enum FoldersCmd {
     /// Forget a mapping
     #[command(visible_alias = "remove")]
     Rm { shared: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysCmd {
+    /// List saved keys
+    Ls,
+    /// Save a private key in Clibooker (FILE's .pub is read too, if it's next to it)
+    Import {
+        /// The private key file, or - to read it from stdin
+        file: String,
+        /// Name to save it as (default: from the file name)
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+    /// Make a new key with ssh-keygen (it asks for a passphrase)
+    New {
+        name: String,
+        /// Comment stored in the key (default: you@this-device)
+        #[arg(short = 'C', long)]
+        comment: Option<String>,
+        #[arg(short = 't', long = "type", value_enum, default_value_t = KeyKind::Ed25519)]
+        kind: KeyKind,
+        /// Make it without a passphrase (nothing is asked)
+        #[arg(long)]
+        no_passphrase: bool,
+    },
+    /// Put a key on a server, so it logs in with it (you log in once more, usually with a password)
+    Install {
+        name: String,
+        /// Server name, ~/.ssh/config alias, or user@host[:port]
+        server: String,
+    },
+    /// Type a key's passphrase once: ssh-agent (and the macOS Keychain) keeps it
+    Unlock { name: String },
+    /// Take a key out of ssh-agent (and forget its passphrase in the macOS Keychain)
+    Lock { name: String },
+    /// Print a key's public key (for a server's ~/.ssh/authorized_keys)
+    Pub { name: String },
+    /// Rename a saved key (servers that use it follow)
+    #[command(visible_alias = "rename")]
+    Mv { old: String, new: String },
+    /// Delete a saved key, here and on your other devices
+    #[command(visible_alias = "remove")]
+    Rm {
+        name: String,
+        /// Don't ask
+        #[arg(short, long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum KeyKind {
+    Ed25519,
+    /// RSA 4096, for servers too old for Ed25519
+    Rsa,
 }
 
 #[derive(Debug, Subcommand)]

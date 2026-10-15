@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod exec;
 mod folders_cmds;
+mod keys_cmds;
 mod manage;
 mod remote_cmds;
 mod shellcmds;
@@ -67,6 +68,7 @@ fn run(ctx: &commands::Ctx, cmd: Option<Cmd>) -> anyhow::Result<i32> {
         Some(Cmd::Import { file, project, on_conflict }) => manage::import(ctx, &file, project, on_conflict),
         Some(Cmd::Scan(a)) => manage::scan(ctx, a),
         Some(Cmd::Server { cmd, check }) => remote_cmds::server(ctx, cmd, check),
+        Some(Cmd::Keys { cmd }) => keys_cmds::keys(ctx, cmd),
         Some(Cmd::Ssh { server, command }) => remote_cmds::ssh(ctx, &server, &command),
         Some(Cmd::Sync { cmd, background }) => sync_cmds::sync(ctx, cmd, background),
         Some(Cmd::Init { .. } | Cmd::App | Cmd::RunSteps { .. }) => unreachable!("handled above"),

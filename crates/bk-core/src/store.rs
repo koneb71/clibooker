@@ -27,6 +27,7 @@ pub const RESERVED_NAMES: &[&str] = &[
     "history",
     "import",
     "init",
+    "keys",
     "list",
     "locate",
     "ls",
@@ -413,6 +414,19 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
     if let Ok(meta) = fs::metadata(target) {
         fs::set_permissions(tmp.path(), meta.permissions())?;
     }
+    tmp.persist(target).with_context(|| format!("writing {}", target.display()))?;
+    Ok(())
+}
+
+/// Write a private file atomically: mode 0600 on Unix (whatever the file had before); on
+/// Windows it inherits the per-user data folder's permissions.
+pub fn write_private(target: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = target.parent().context("no parent directory")?;
+    fs::create_dir_all(dir)?;
+    // NamedTempFile creates its file 0600 on Unix.
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
     tmp.persist(target).with_context(|| format!("writing {}", target.display()))?;
     Ok(())
 }

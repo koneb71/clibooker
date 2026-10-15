@@ -100,10 +100,12 @@ pub fn validate_server(name: &str, s: &Server) -> Result<(), String> {
             validate_destination(hop)?;
         }
     }
-    if let Some(i) = &s.identity
-        && (i.trim().is_empty() || i.starts_with('-'))
-    {
-        return Err(bad(format!("invalid identity file `{i}`")));
+    if let Some(i) = &s.identity {
+        if let Some(name) = crate::keys::saved_name(i) {
+            crate::keys::validate_name(name).map_err(|e| e.to_string())?;
+        } else if i.trim().is_empty() || i.starts_with('-') {
+            return Err(bad(format!("invalid identity file `{i}`")));
+        }
     }
     for f in &s.forward {
         validate_forward(f)?;
@@ -350,23 +352,45 @@ unsafe extern "C" {
     fn libc_getuid() -> u32;
 }
 
-/// ssh arguments (everything after the program name, up to and including the destination).
-pub fn ssh_args(t: &Target, purpose: Purpose, paths: &Paths) -> Vec<String> {
+/// macOS's own OpenSSH (`/usr/bin/ssh`, `/usr/bin/ssh-add`), the only one that knows the
+/// Keychain: others refuse to start with `UseKeychain`.
+pub fn apple_openssh(program: &str) -> bool {
+    cfg!(target_os = "macos") && program.starts_with("/usr/bin/")
+}
+
+/// ssh arguments (everything after the program name, up to and including the destination)
+/// for running `program`.
+///
+/// A saved key (`key:NAME`) is used when it's on this device; otherwise ssh falls back to the
+/// agent and the default keys. In a terminal, its passphrase is remembered once typed: the
+/// agent keeps it, and Apple's ssh the Keychain (unless the server's options say otherwise).
+pub fn ssh_args(program: &str, t: &Target, purpose: Purpose, paths: &Paths) -> Vec<String> {
     let mut a: Vec<String> = vec!["-e".into(), "none".into()];
     let mut opt = |k: &str, v: &str| {
         a.push("-o".into());
         a.push(format!("{k}={v}"));
     };
-    if !t.options.keys().any(|k| k.eq_ignore_ascii_case("ServerAliveInterval")) {
+    let has = |name: &str| t.options.keys().any(|k| k.eq_ignore_ascii_case(name));
+    if !has("ServerAliveInterval") {
         opt("ServerAliveInterval", "15");
         opt("ServerAliveCountMax", "4");
     }
+    let apple = apple_openssh(program);
     for (k, v) in &t.options {
-        // Only Apple's ssh knows UseKeychain; others refuse to start with it.
-        if k.eq_ignore_ascii_case("UseKeychain") && !cfg!(target_os = "macos") {
+        if k.eq_ignore_ascii_case("UseKeychain") && !apple {
             continue;
         }
         opt(k, v);
+    }
+    let identity = t.identity.as_deref().and_then(|i| crate::keys::identity_file(i, paths));
+    let saved_key = identity.is_some() && t.identity.as_deref().and_then(crate::keys::saved_name).is_some();
+    if saved_key {
+        if purpose == Purpose::Interactive && !has("AddKeysToAgent") {
+            opt("AddKeysToAgent", "yes");
+        }
+        if apple && !has("UseKeychain") {
+            opt("UseKeychain", "yes");
+        }
     }
     match purpose {
         Purpose::Interactive => a.push("-tt".into()),
@@ -397,8 +421,8 @@ pub fn ssh_args(t: &Target, purpose: Purpose, paths: &Paths) -> Vec<String> {
     if let Some(p) = t.port {
         a.extend(["-p".into(), p.to_string()]);
     }
-    if let Some(i) = &t.identity {
-        a.extend(["-i".into(), paths::expand_tilde(i).display().to_string()]);
+    if let Some(file) = identity {
+        a.extend(["-i".into(), file.display().to_string()]);
         a.extend(["-o".into(), "IdentitiesOnly=yes".into()]);
     }
     if let Some(j) = &t.jump {
@@ -481,7 +505,7 @@ pub struct BatchOutput {
 impl Batch<'_> {
     fn command(&self, remote: &str) -> Command {
         let mut c = crate::proc::background(&self.program);
-        c.args(ssh_args(self.target, Purpose::Batch, self.paths));
+        c.args(ssh_args(&self.program, self.target, Purpose::Batch, self.paths));
         c.arg(remote);
         c.env_clear().envs(&self.env);
         c
@@ -529,7 +553,10 @@ impl Batch<'_> {
     }
 }
 
-fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Result<(Option<i32>, Vec<u8>, Vec<u8>)> {
+pub(crate) fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<(Option<i32>, Vec<u8>, Vec<u8>)> {
     use std::io::Read;
     let mut so = child.stdout.take().expect("piped");
     let mut se = child.stderr.take().expect("piped");
@@ -897,20 +924,65 @@ mod tests {
             Server { host: "b.example".into(), user: Some("me".into()), port: Some(22), ..Default::default() },
         );
         let t = resolve_target("gpu", &servers).unwrap();
-        let a = ssh_args(&t, Purpose::Interactive, &paths);
+        let a = ssh_args("ssh", &t, Purpose::Interactive, &paths);
         let s = a.join(" ");
         assert!(s.starts_with("-e none -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -tt -p 2222 -i "), "{s}");
         assert!(s.contains("-o IdentitiesOnly=yes -J me@b.example:22 -- ubuntu@10.0.0.5"), "{s}");
         assert_eq!(a.last().unwrap(), "ubuntu@10.0.0.5");
-        let b = ssh_args(&t, Purpose::Batch, &paths).join(" ");
+        let b = ssh_args("ssh", &t, Purpose::Batch, &paths).join(" ");
         assert!(b.contains("-T -o BatchMode=yes"), "{b}");
         assert_eq!(b.contains("ControlMaster=auto"), MULTIPLEX, "{b}");
-        let tun = ssh_args(&t, Purpose::Tunnel, &paths).join(" ");
+        let tun = ssh_args("ssh", &t, Purpose::Tunnel, &paths).join(" ");
         assert!(tun.contains("-N -T -o ExitOnForwardFailure=yes"), "{tun}");
         assert_eq!(tun.contains("-o ControlMaster=no -S none"), MULTIPLEX, "{tun}");
         let lit = resolve_target("deploy@web1.example:2200", &BTreeMap::new()).unwrap();
         assert_eq!((lit.destination.as_str(), lit.port), ("deploy@web1.example", Some(2200)));
         assert!(resolve_target("-oProxyCommand=x", &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn saved_keys_in_argv() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = Paths { config_file: d.path().join("b.toml"), data_dir: d.path().join("data") };
+        let mut servers = BTreeMap::new();
+        let mut lab = Server { host: "h".into(), identity: Some("key:lab".into()), ..Default::default() };
+        servers.insert("lab".to_string(), lab.clone());
+        let argv = |servers: &BTreeMap<String, Server>, program: &str, purpose| {
+            ssh_args(program, &resolve_target("lab", servers).unwrap(), purpose, &paths).join(" ")
+        };
+        // Not on this device: ssh falls back to the agent and default keys.
+        let a = argv(&servers, "ssh", Purpose::Interactive);
+        assert!(!a.contains("-i ") && !a.contains("IdentitiesOnly") && !a.contains("AddKeysToAgent"), "{a}");
+
+        let key = crate::keys::dir(&paths).join("lab");
+        fs::create_dir_all(key.parent().unwrap()).unwrap();
+        fs::write(&key, "").unwrap();
+        let a = argv(&servers, "ssh", Purpose::Interactive);
+        assert!(a.contains("-o AddKeysToAgent=yes"), "{a}");
+        assert!(a.contains(&format!("-i {} -o IdentitiesOnly=yes", key.display())), "{a}");
+        assert!(!a.contains("UseKeychain"), "only Apple's ssh knows it: {a}");
+        assert_eq!(
+            argv(&servers, "/usr/bin/ssh", Purpose::Interactive).contains("-o UseKeychain=yes"),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            argv(&servers, "/usr/bin/ssh", Purpose::Batch).contains("-o UseKeychain=yes"),
+            cfg!(target_os = "macos")
+        );
+        assert!(!argv(&servers, "ssh", Purpose::Batch).contains("AddKeysToAgent"));
+
+        // The server's own options win.
+        lab.options.insert("AddKeysToAgent".into(), "no".into());
+        lab.options.insert("UseKeychain".into(), "no".into());
+        servers.insert("lab".to_string(), lab.clone());
+        let a = argv(&servers, "/usr/bin/ssh", Purpose::Interactive);
+        assert!(a.contains("AddKeysToAgent=no") && !a.contains("AddKeysToAgent=yes"), "{a}");
+        assert!(!a.contains("UseKeychain=yes"), "{a}");
+        // Homebrew's ssh on a Mac would refuse UseKeychain.
+        assert!(!argv(&servers, "/opt/homebrew/bin/ssh", Purpose::Interactive).contains("UseKeychain"));
+
+        lab.identity = Some("key:Bad.Name".into());
+        assert!(validate_server("lab", &lab).is_err());
     }
 
     #[test]

@@ -199,8 +199,8 @@ pub fn connect_server(
     let t = target(&state, &name)?;
     let program = program(&state);
     let env = servers::ssh_env(&state.base_env());
-    let spawn =
-        Spawn::session(&t.name, &program, remote::session_args(&t, &state.paths), &t, env.clone(), t.forward.clone());
+    let args = remote::session_args(&program, &t, &state.paths);
+    let spawn = Spawn::session(&t.name, &program, args, &t, env.clone(), t.forward.clone());
     let ctl = crate::runs::RemoteCtl { program, target: t, paths: state.paths.clone(), env };
     state.runs.start(app, spawn, session_opts(&state, cols, rows), Some(&ctl)).map_err(e)
 }

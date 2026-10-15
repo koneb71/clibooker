@@ -64,7 +64,7 @@ impl Tunnels {
             let spawned = bk_core::proc::background(program)
                 .arg("-L")
                 .arg(f)
-                .args(servers::ssh_args(target, Purpose::Tunnel, paths))
+                .args(servers::ssh_args(program, target, Purpose::Tunnel, paths))
                 .env_clear()
                 .envs(env)
                 .stdin(Stdio::null())

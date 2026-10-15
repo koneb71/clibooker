@@ -182,6 +182,19 @@ pub fn replace_process(program: &str, args: &[String], env: &EnvMap) -> Result<i
     }
 }
 
+/// Run a program attached to this terminal and carry on when it's done (ssh-keygen, ssh-add, an
+/// ssh that does one thing).
+pub fn run_attached(program: &str, args: &[String], env: &EnvMap) -> Result<i32> {
+    catch_ctrl_c();
+    let status = Command::new(program)
+        .args(args)
+        .env_clear()
+        .envs(env)
+        .status()
+        .with_context(|| format!("starting {program}"))?;
+    Ok(proc::exit_code(status))
+}
+
 /// End like the interrupted child did, so calling shells and loops see the interrupt.
 pub fn reraise_sigint() -> ! {
     #[cfg(unix)]

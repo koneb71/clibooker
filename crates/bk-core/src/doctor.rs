@@ -70,6 +70,15 @@ fn check_remote(
     match crate::servers::resolve_target(&server, servers) {
         Err(err) => problems.push(format!("{err:#}")),
         Ok(t) => {
+            if let Some(key) = t.identity.as_deref().and_then(crate::keys::saved_name)
+                && !crate::keys::exists(paths, key)
+            {
+                warnings.push(format!(
+                    "{} uses the saved key `{key}`, which isn't on this device (sync, or `bk keys import`); \
+                     until then ssh tries your agent and default keys",
+                    t.name
+                ));
+            }
             if crate::servers::load_cached(paths, &t.name).is_none() {
                 warnings.push(format!("{} hasn't been scanned yet; env and runtimes aren't checked", t.name));
             } else {

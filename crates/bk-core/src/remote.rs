@@ -412,7 +412,7 @@ pub fn build(entry: &Entry, req: &RunRequest, inp: &RemoteInputs) -> Result<Remo
         "{HELPERS}{}",
         wrapper(&wsteps, &WrapperOptions { markers: inp.markers, state_file: None, title, prelude })
     );
-    let mut args = servers::ssh_args(&target, Purpose::Interactive, inp.paths);
+    let mut args = servers::ssh_args(&inp.ssh_program, &target, Purpose::Interactive, inp.paths);
     args.push(remote_command(&script, &shell, target.login));
 
     let mut params = values.clone();
@@ -559,7 +559,7 @@ pub fn detached_start(plan: &RemotePlan, b: &Batch, paths: &Paths) -> Result<Vec
         bail!("couldn't upload the run script: {}", up.stderr.trim());
     }
     let interactive = start_command(&plan.name, &remote_shell(&plan.target, None));
-    let mut args = servers::ssh_args(&plan.target, Purpose::Interactive, paths);
+    let mut args = servers::ssh_args(&plan.program, &plan.target, Purpose::Interactive, paths);
     args.push(remote_command(&interactive, "sh", plan.target.login));
     Ok(args)
 }
@@ -581,7 +581,7 @@ pub fn start_command(bookmark: &str, shell: &str) -> String {
 
 /// Attach to a detached run that's still going.
 pub fn detached_attach(plan: &RemotePlan, paths: &Paths) -> Vec<String> {
-    let mut args = servers::ssh_args(&plan.target, Purpose::Interactive, paths);
+    let mut args = servers::ssh_args(&plan.program, &plan.target, Purpose::Interactive, paths);
     let cmd = format!("exec tmux attach -t {}\n", q(&format!("={}", tmux_name(&plan.name))));
     args.push(remote_command(&cmd, "sh", plan.target.login));
     args
@@ -626,14 +626,14 @@ pub fn shell_here(entry: &Entry, inp: &RemoteInputs) -> Result<(Target, Vec<Stri
     let script = format!(
         "BK_RC=$(mktemp 2>/dev/null || echo /tmp/bk-rc-$$)\nexport BK_RC\ncat > \"$BK_RC\" <<'BK_RC_EOF'\n{rc}BK_RC_EOF\nexec bash --rcfile \"$BK_RC\" -i\n"
     );
-    let mut args = servers::ssh_args(&target, Purpose::Interactive, inp.paths);
+    let mut args = servers::ssh_args(&inp.ssh_program, &target, Purpose::Interactive, inp.paths);
     args.push(remote_command(&script, "bash", target.login));
     Ok((target, args))
 }
 
-/// Plain interactive login session (`bk ssh`, the app's Connect).
-pub fn session_args(target: &Target, paths: &Paths) -> Vec<String> {
-    servers::ssh_args(target, Purpose::Interactive, paths)
+/// Plain interactive login session (`bk ssh`, the app's Connect) with `program`.
+pub fn session_args(program: &str, target: &Target, paths: &Paths) -> Vec<String> {
+    servers::ssh_args(program, target, Purpose::Interactive, paths)
 }
 
 #[cfg(all(test, unix))]

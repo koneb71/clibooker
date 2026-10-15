@@ -454,3 +454,76 @@ fn per_os_commands_and_shell_stand_ins() {
         .stderr(contains("zsh isn't installed here; bash runs these steps"));
     s.bk().arg("doctor").assert().stderr(contains("zsh isn't installed here"));
 }
+
+/// `bk keys`: import (a file, its .pub, stdin), list, print, rename, delete; servers name
+/// them as `key:NAME`, and doctor notices one that isn't here.
+#[test]
+fn saved_ssh_keys() {
+    if StdCommand::new("ssh-keygen").arg("-?").output().is_err() {
+        eprintln!("skipping: no ssh-keygen");
+        return;
+    }
+    let s = Sandbox::new();
+    let make = |name: &str| {
+        let f = s.path().join(name);
+        let ok = StdCommand::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "me@test", "-f"])
+            .arg(&f)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        f
+    };
+    let lab = make("id_lab");
+    s.bk()
+        .args(["keys", "import"])
+        .arg(&lab)
+        .args(["--name", "lab"])
+        .assert()
+        .success()
+        .stderr(contains("saved key lab").and(contains("has no passphrase")));
+    let public = std::fs::read_to_string(format!("{}.pub", lab.display())).unwrap();
+    s.bk().args(["keys", "pub", "lab"]).assert().success().stdout(public.clone());
+    s.bk().arg("keys").assert().success().stdout(contains("lab").and(contains("ED25519")).and(contains("SHA256:")));
+    s.bk()
+        .args(["keys", "import"])
+        .arg(&lab)
+        .args(["--name", "lab"])
+        .assert()
+        .failure()
+        .stderr(contains("already saved"));
+    s.bk()
+        .args(["keys", "import"])
+        .arg(&lab)
+        .args(["--name", "x"])
+        .assert()
+        .failure()
+        .stderr(contains("saved as `lab`"));
+    s.bk()
+        .args(["keys", "import"])
+        .arg(format!("{}.pub", lab.display()))
+        .assert()
+        .failure()
+        .stderr(contains("public key"));
+    let pasted = std::fs::read_to_string(make("other")).unwrap();
+    s.bk().args(["keys", "import", "-"]).assert().failure().stderr(contains("--name"));
+    s.bk().args(["keys", "import", "-", "--name", "pasted"]).write_stdin(pasted).assert().success();
+    s.bk().args(["keys", "mv", "pasted", "work"]).assert().success();
+    s.bk().args(["keys", "new", "fresh"]).assert().failure().stderr(contains("--no-passphrase"));
+    s.bk().args(["keys", "new", "fresh", "--no-passphrase"]).assert().success().stderr(contains("bk keys install"));
+    s.bk().arg("keys").assert().success().stdout(contains("fresh").and(contains("work")));
+
+    s.bk().args(["server", "add", "gpu", "me@10.0.0.5", "-i", "key:lab"]).assert().success();
+    s.bk()
+        .args(["server", "add", "bad", "me@10.0.0.5", "-i", "key:Lab.x"])
+        .assert()
+        .failure()
+        .stderr(contains("key name"));
+    s.bk().arg("keys").assert().success().stdout(contains("used by gpu"));
+    s.add(&["train", "--server", "gpu", "python train.py"]);
+    s.bk().args(["keys", "rm", "lab"]).assert().failure().stderr(contains("--yes"));
+    s.bk().args(["keys", "rm", "lab", "--yes"]).assert().success().stderr(contains("still set to use it: gpu"));
+    s.bk().arg("doctor").assert().stderr(contains("saved key `lab`, which isn't on this device"));
+    s.bk().args(["add", "keys", "ls"]).assert().failure().stderr(contains("subcommand"));
+}

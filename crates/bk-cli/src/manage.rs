@@ -7,6 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use bk_core::env::{conda, discover};
+use bk_core::keys::{self, Agent};
 use bk_core::{Bookmark, doctor, history, paths, recent, store, trust};
 use console::style;
 use dialoguer::Confirm;
@@ -228,13 +229,40 @@ pub fn doctor(ctx: &Ctx) -> Result<i32> {
         Err(_) => warn(&format!("ssh not found at {ssh}")),
     }
     let remote_used = lib.entries.iter().any(|e| e.bookmark.is_remote());
-    if remote_used || !lib.servers.is_empty() {
-        match Command::new("ssh-add").arg("-l").output() {
-            Ok(o) if o.status.success() => {
-                let n = String::from_utf8_lossy(&o.stdout).lines().count();
+    let saved = keys::list(&ctx.paths);
+    if remote_used || !lib.servers.is_empty() || !saved.is_empty() {
+        let agent = keys::agent(&keys::tool(&ssh, "ssh-add"), &bk_core::servers::ssh_env(&ctx.env));
+        match &agent {
+            Agent::Running(fps) if !fps.is_empty() => {
+                let n = fps.len();
                 ok(&format!("ssh-agent has {n} key{}", if n == 1 { "" } else { "s" }))
             }
-            _ => warn("ssh-agent has no keys loaded (ssh-add), so background checks and env discovery may fail"),
+            Agent::Running(_) => {
+                warn("ssh-agent has no keys loaded (ssh-add), so background checks and env discovery may fail")
+            }
+            Agent::Unavailable(why) => warn(&format!("{why}; keys with a passphrase are asked for every time")),
+        }
+        if !saved.is_empty() {
+            let n = saved.len();
+            ok(&format!(
+                "{n} saved SSH key{} ({})",
+                if n == 1 { "" } else { "s" },
+                paths::contract_tilde(&keys::dir(&ctx.paths))
+            ));
+            let locked: Vec<&str> =
+                saved.iter().filter(|k| k.encrypted && !agent.holds(&k.fingerprint)).map(|k| k.name.as_str()).collect();
+            if !locked.is_empty() && matches!(agent, Agent::Running(_)) {
+                warn(&format!("locked: {} (`bk keys unlock NAME` so background checks can use it)", locked.join(", ")));
+            }
+        }
+        for (name, s) in &lib.servers {
+            if let Some(key) = s.identity.as_deref().and_then(keys::saved_name)
+                && !keys::exists(&ctx.paths, key)
+            {
+                warn(&format!(
+                    "server {name} uses the saved key `{key}`, which isn't on this device (sync, or bk keys import)"
+                ));
+            }
         }
     }
     if let Some(pf) = &ctx.project_file {

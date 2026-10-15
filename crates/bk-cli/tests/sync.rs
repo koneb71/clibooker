@@ -146,3 +146,35 @@ fn automatic_sync_in_the_background() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     a.bk().args(["sync", "status"]).assert().success().stdout(contains("to send").not());
 }
+
+/// Saved SSH keys reach the other device with the servers that use them, and deleting one
+/// deletes it there too.
+#[test]
+fn saved_keys_travel() {
+    let keygen = bk_core::keys::tool(&bk_core::servers::ssh_program(None), "ssh-keygen");
+    if std::process::Command::new(&keygen).arg("-?").output().is_err() {
+        eprintln!("skipping: no ssh-keygen");
+        return;
+    }
+    let tg = FakeTelegram::start();
+    let root = tempfile::tempdir().unwrap();
+    let (a, b) = (Device::new(root.path(), "a", &tg.url()), Device::new(root.path(), "b", &tg.url()));
+    set_up(&tg, &a, "laptop");
+    set_up(&tg, &b, "desktop");
+    a.bk()
+        .args(["keys", "new", "lab", "--no-passphrase"])
+        .assert()
+        .success()
+        .stderr(contains("protected by your sync passphrase alone"));
+    a.bk().args(["server", "add", "gpu", "me@10.0.0.5", "-i", "key:lab"]).assert().success();
+    a.bk().arg("sync").assert().success();
+    b.bk().arg("sync").assert().success();
+    b.bk().arg("keys").assert().success().stdout(contains("lab").and(contains("used by gpu")));
+    let key = |d: &Device| std::fs::read_to_string(d.dir.join("data").join("keys").join("lab")).ok();
+    assert!(key(&b).is_some() && key(&b) == key(&a));
+
+    b.bk().args(["keys", "rm", "lab", "--yes"]).assert().success();
+    b.bk().arg("sync").assert().success();
+    a.bk().arg("sync").assert().success();
+    assert_eq!(key(&a), None);
+}

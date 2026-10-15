@@ -1,10 +1,12 @@
 //! Sync between devices through a Telegram bot.
 //!
 //! The chat with your bot holds one pinned, encrypted snapshot of everything that syncs:
-//! global bookmarks, servers, settings (shared ones, plus each OS's own) and run history.
+//! global bookmarks, servers, saved SSH keys, settings (shared ones, plus each OS's own) and
+//! run history.
 //! `sync` downloads it, merges it with this device item by item (the newest change wins,
 //! deletions included), writes what changed here, and uploads a new snapshot if this device
-//! had anything newer.
+//! had anything newer. A saved key is the exception to "newest wins": sync never replaces a
+//! different key saved under the same name, and never deletes one this device hasn't synced.
 //!
 //! Syncing is automatic unless turned off on a device: [`pending`] says (without the network)
 //! whether this device has changes to send, and [`remote_head`] (one cheap call) whether
@@ -25,6 +27,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::history::{self, RunRecord};
+use crate::keys::{self, ApplyError};
 use crate::model::{BookFile, Bookmark, Server, Settings};
 use crate::paths::Paths;
 use crate::store;
@@ -86,35 +89,13 @@ fn sync_dir(paths: &Paths) -> PathBuf {
     paths.data_dir.join("sync")
 }
 
-/// Write a private file (mode 0600 on Unix; the per-user data folder on Windows).
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(d) = path.parent() {
-        fs::create_dir_all(d)?;
-    }
-    let tmp = path.with_extension("tmp");
-    {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
-        std::io::Write::write_all(&mut f, bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
-}
-
 impl SyncConfig {
     pub fn load(paths: &Paths) -> Option<SyncConfig> {
         serde_json::from_str(&fs::read_to_string(sync_dir(paths).join("config.json")).ok()?).ok()
     }
 
     fn save(&self, paths: &Paths) -> Result<()> {
-        write_private(&sync_dir(paths).join("config.json"), serde_json::to_string_pretty(self)?.as_bytes())
+        store::write_private(&sync_dir(paths).join("config.json"), serde_json::to_string_pretty(self)?.as_bytes())
     }
 
     fn key(&self) -> Result<Key> {
@@ -270,7 +251,7 @@ impl State {
     }
 
     fn save(&self, paths: &Paths) -> Result<()> {
-        write_private(&sync_dir(paths).join("state.json"), serde_json::to_string(self)?.as_bytes())
+        store::write_private(&sync_dir(paths).join("state.json"), serde_json::to_string(self)?.as_bytes())
     }
 }
 
@@ -316,11 +297,20 @@ fn hash(v: &Value) -> String {
 }
 
 const GONE: &str = "-";
+/// A synced key that clashes with a different one saved here under its name: this device keeps
+/// its own (`clash:` + its hash), and neither sends it nor counts it as deleted.
+const CLASH: &str = "clash:";
 
-/// Keys this device owns: bookmarks, servers, shared settings and this OS's settings.
+/// What this device has is what it last synced (or kept, in a clash).
+fn same(s: &ItemState, v: &Value) -> bool {
+    let h = hash(v);
+    s.hash == h || s.hash.strip_prefix(CLASH) == Some(h.as_str())
+}
+
+/// Keys this device owns: bookmarks, servers, saved keys, shared settings and this OS's settings.
 fn is_mine(key: &str) -> bool {
     match key.split_once(':') {
-        Some(("bookmark" | "server", _)) => true,
+        Some(("bookmark" | "server" | "key", _)) => true,
         Some(("setting", rest)) => match rest.split_once(':') {
             Some((o, k)) => o == os() && OS_SETTINGS.contains(&k),
             None => SHARED_SETTINGS.contains(&rest),
@@ -348,37 +338,75 @@ fn local_values(paths: &Paths) -> Result<BTreeMap<String, Value>> {
             }
         }
     }
+    for (name, v) in keys::synced_values(paths)? {
+        out.insert(format!("key:{name}"), v);
+    }
     Ok(out)
 }
 
+fn mtime(path: &Path) -> Option<i64> {
+    let t = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64)
+}
+
 fn modified_ms(path: &Path) -> i64 {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_else(now_ms)
+    mtime(path).unwrap_or_else(now_ms)
+}
+
+/// When an item last changed here, as near as the files tell: a saved key's own files (a new
+/// passphrase rewrites them in place) or its folder (keys added, removed or renamed); anything
+/// else, the bookmarks file.
+fn changed_ms(paths: &Paths) -> impl Fn(&str) -> i64 {
+    let config = modified_ms(&paths.config_file);
+    let keys = keys::dir(paths);
+    move |k: &str| match k.strip_prefix("key:") {
+        Some(name) => [keys.join(name), keys.join(format!("{name}.pub")), keys.clone()]
+            .iter()
+            .filter_map(|p| mtime(p))
+            .max()
+            .unwrap_or_else(now_ms),
+        None => config,
+    }
 }
 
 /// This device's items with change times: unchanged since the last sync keeps its time;
-/// changed (or deleted) gets the time the bookmarks file was last saved.
-fn local_items(values: &BTreeMap<String, Value>, state: &State, changed_ms: i64) -> BTreeMap<String, Item> {
+/// changed (or deleted) gets the time its file was last saved.
+fn local_items(
+    values: &BTreeMap<String, Value>,
+    state: &State,
+    changed_ms: impl Fn(&str) -> i64,
+) -> BTreeMap<String, Item> {
     let mut out = BTreeMap::new();
     for (k, v) in values {
         let updated_ms = match state.items.get(k) {
-            Some(s) if s.hash == hash(v) => s.updated_ms,
-            _ => changed_ms,
+            Some(s) if same(s, v) => s.updated_ms,
+            _ => changed_ms(k),
         };
         out.insert(k.clone(), Item { updated_ms, value: Some(v.clone()) });
     }
     for (k, s) in &state.items {
-        if values.contains_key(k) || !is_mine(k) {
+        // A clashing key that's gone here was never the synced one: nothing to delete.
+        if values.contains_key(k) || !is_mine(k) || s.hash.starts_with(CLASH) {
             continue;
         }
-        let updated_ms = if s.hash == GONE { s.updated_ms } else { changed_ms };
+        let updated_ms = if s.hash == GONE { s.updated_ms } else { changed_ms(k) };
         out.insert(k.clone(), Item { updated_ms, value: None });
     }
     out
+}
+
+/// Sync never deletes a key this device hasn't synced (one saved here before the deletion
+/// arrived, a different key under that name, or one changed since): against a deletion, this
+/// device's key takes the name back.
+fn keep_unsynced_keys(merged: &mut BTreeMap<String, Item>, before: &BTreeMap<String, Value>, state: &State) {
+    for (k, item) in merged.iter_mut().filter(|(k, _)| k.starts_with("key:")) {
+        if item.value.is_none()
+            && let Some(v) = before.get(k)
+            && state.items.get(k).is_none_or(|s| s.hash != hash(v))
+        {
+            *item = Item { updated_ms: now_ms(), value: Some(v.clone()) };
+        }
+    }
 }
 
 /// Item by item, the newest change wins (ties go to what's already synced). Old deletions
@@ -404,12 +432,14 @@ pub fn merge(local: &BTreeMap<String, Item>, remote: &BTreeMap<String, Item>, no
         .collect()
 }
 
-/// Write the merged values that differ from this device's. Returns how many changed here.
+/// Write the merged values that differ from this device's. Returns how many changed here;
+/// keys that clash with a different one here go in `clashes`.
 fn apply(
     paths: &Paths,
     before: &BTreeMap<String, Value>,
     merged: &BTreeMap<String, Item>,
     skipped: &mut Vec<String>,
+    clashes: &mut BTreeSet<String>,
 ) -> Result<usize> {
     let file = &paths.config_file;
     let mut changed = 0;
@@ -428,6 +458,18 @@ fn apply(
             ("server", Some(v)) => serde_json::from_value::<Server>(v.clone())
                 .map_err(anyhow::Error::from)
                 .and_then(|s| store::upsert_server(file, name, &s)),
+            ("key", None) => keys::remove(paths, name).map(drop),
+            ("key", Some(v)) => match keys::apply_synced(paths, name, v) {
+                Ok(()) => Ok(()),
+                Err(ApplyError::Clash) => {
+                    clashes.insert(k.clone());
+                    skipped.push(format!(
+                        "key `{name}`: a different key has this name here; rename one of them (bk keys mv)"
+                    ));
+                    continue;
+                }
+                Err(ApplyError::Other(e)) => Err(e),
+            },
             ("setting", value) => {
                 let obj = match &mut settings {
                     Some(o) => o,
@@ -539,11 +581,26 @@ pub struct Pending {
 pub fn pending(paths: &Paths) -> Result<Pending> {
     let state = State::load(paths);
     let values = local_values(paths)?;
-    let changed = values.iter().filter(|(k, v)| state.items.get(*k).is_none_or(|s| s.hash != hash(v))).count();
-    let deleted = state.items.iter().filter(|(k, s)| s.hash != GONE && is_mine(k) && !values.contains_key(*k)).count();
+    let changed = values.iter().filter(|(k, v)| state.items.get(*k).is_none_or(|s| !same(s, v))).count();
+    let deleted = state
+        .items
+        .iter()
+        .filter(|(k, s)| s.hash != GONE && !s.hash.starts_with(CLASH) && is_mine(k) && !values.contains_key(*k))
+        .count();
     let history = paths.history_file();
     let new_runs = history.exists() && state.last_sync_ms.is_none_or(|t| modified_ms(&history) > t);
     Ok(Pending { items: changed + deleted, new_runs })
+}
+
+/// Saved keys whose name another device uses for a different key (as of the last sync).
+pub fn key_clashes(paths: &Paths) -> BTreeSet<String> {
+    let state = State::load(paths);
+    state
+        .items
+        .iter()
+        .filter(|(_, s)| s.hash.starts_with(CLASH))
+        .filter_map(|(k, _)| k.strip_prefix("key:").map(String::from))
+        .collect()
 }
 
 fn lock_file(paths: &Paths) -> Result<fs::File> {
@@ -589,11 +646,13 @@ fn sync_locked(paths: &Paths, cfg: &SyncConfig) -> Result<Summary> {
     let remote_snap = remote.as_ref().map(|(_, s)| s).unwrap_or(&empty);
     summary.from_device = remote.as_ref().map(|(_, s)| s.device.clone()).filter(|d| *d != cfg.device);
 
-    // Bookmarks, servers, settings.
+    // Bookmarks, servers, keys, settings.
     let before = local_values(paths)?;
-    let local = local_items(&before, &state, modified_ms(&paths.config_file));
-    let merged = merge(&local, &remote_snap.items, now_ms());
-    summary.received = apply(paths, &before, &merged, &mut summary.skipped)?;
+    let local = local_items(&before, &state, changed_ms(paths));
+    let mut merged = merge(&local, &remote_snap.items, now_ms());
+    keep_unsynced_keys(&mut merged, &before, &state);
+    let mut clashes = BTreeSet::new();
+    summary.received = apply(paths, &before, &merged, &mut summary.skipped, &mut clashes)?;
     summary.sent = merged.iter().filter(|(k, item)| remote_snap.items.get(*k) != Some(*item)).count();
 
     // Run history: a union, unless this device keeps no history.
@@ -674,7 +733,11 @@ fn sync_locked(paths: &Paths, cfg: &SyncConfig) -> Result<Summary> {
         .iter()
         .filter(|(k, _)| is_mine(k))
         .map(|(k, item)| {
-            let hash = after.get(k).map(hash).unwrap_or_else(|| GONE.to_string());
+            let hash = match after.get(k) {
+                Some(v) if clashes.contains(k) => format!("{CLASH}{}", hash(v)),
+                Some(v) => hash(v),
+                None => GONE.to_string(),
+            };
             (k.clone(), ItemState { hash, updated_ms: item.updated_ms })
         })
         .collect();
@@ -739,12 +802,45 @@ mod tests {
             ("bookmark:fresh".to_string(), json!({"command": "f"})),
         ]
         .into();
-        let l = local_items(&values, &state, 99);
+        let l = local_items(&values, &state, |_| 99);
         assert_eq!(l["bookmark:same"].updated_ms, 5);
         assert_eq!(l["bookmark:edited"].updated_ms, 99);
         assert_eq!(l["bookmark:fresh"].updated_ms, 99);
         assert_eq!(l["bookmark:deleted"], item(99, None));
         assert_eq!(l["bookmark:long-gone"], item(3, None));
+    }
+
+    #[test]
+    fn keys_that_were_never_synced_survive_deletions() {
+        let (v, kept, edited) = (json!({"private": "a"}), json!({"private": "b"}), json!({"private": "c"}));
+        let before: BTreeMap<String, Value> = [
+            ("key:fresh".to_string(), v.clone()),
+            ("key:synced".to_string(), kept.clone()),
+            ("key:edited".to_string(), edited.clone()),
+            ("key:clash".to_string(), v.clone()),
+        ]
+        .into();
+        let mut state = State::default();
+        let st = |hash: String| ItemState { hash, updated_ms: 1 };
+        state.items.insert("key:synced".into(), st(hash(&kept)));
+        state.items.insert("key:edited".into(), st(hash(&json!({"private": "before"}))));
+        state.items.insert("key:clash".into(), st(format!("{CLASH}{}", hash(&v))));
+        let mut merged: BTreeMap<String, Item> = ["key:fresh", "key:synced", "key:edited", "key:clash", "bookmark:b"]
+            .map(|k| (k.to_string(), item(5, None)))
+            .into();
+        keep_unsynced_keys(&mut merged, &before, &state);
+        assert_eq!(merged["key:fresh"].value, Some(v.clone()), "saved here before the deletion arrived");
+        assert_eq!(merged["key:synced"].value, None, "exactly what this device synced: deleted");
+        assert_eq!(merged["key:edited"].value, Some(edited));
+        assert_eq!(merged["key:clash"].value, Some(v.clone()), "the other key was deleted: this one takes the name");
+        assert_eq!(merged["bookmark:b"].value, None);
+
+        // A clashing key is this device's own: unchanged, and gone without a deletion to send.
+        let l = local_items(&before, &state, |_| 99);
+        assert_eq!(l["key:clash"].updated_ms, 1);
+        let l = local_items(&BTreeMap::new(), &state, |_| 99);
+        assert!(!l.contains_key("key:clash"));
+        assert_eq!(l["key:synced"], item(99, None));
     }
 
     fn device(dir: &Path, name: &str) -> Paths {
@@ -882,6 +978,53 @@ mod tests {
         sync(&b, &cb).unwrap();
         assert_eq!(command(&b, "other"), None);
 
+        // Saved keys travel, kept private, and a server that uses one comes along.
+        let fp = |p: &Paths, name: &str| keys::info(p, name).map(|k| k.fingerprint).ok();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        keys::import(&a, "lab", &keys::fake::key(1), None, "ssh-keygen").unwrap();
+        let lab = Server { host: "lab.example".into(), identity: Some("key:lab".into()), ..Default::default() };
+        store::upsert_server(&a.config_file, "lab", &lab).unwrap();
+        assert_eq!(pending(&a).unwrap().items, 2);
+        sync(&a, &ca).unwrap();
+        let s = sync(&b, &cb).unwrap();
+        assert_eq!(s.received, 2, "{s:?}");
+        assert!(fp(&b, "lab").is_some() && fp(&b, "lab") == fp(&a, "lab"));
+        assert_eq!(store::read_file(&b.config_file).unwrap().servers["lab"], lab);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(keys::dir(&b).join("lab")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(pending(&b).unwrap().items, 0);
+
+        // A different key under a name the other device uses: neither device loses its own.
+        keys::import(&a, "dup", &keys::fake::key(2), None, "ssh-keygen").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        keys::import(&b, "dup", &keys::fake::key(3), None, "ssh-keygen").unwrap();
+        let (a_dup, b_dup) = (fp(&a, "dup"), fp(&b, "dup"));
+        sync(&a, &ca).unwrap();
+        sync(&b, &cb).unwrap();
+        let s = sync(&a, &ca).unwrap();
+        assert!(s.skipped.iter().any(|m| m.contains("key `dup`") && m.contains("rename")), "{s:?}");
+        assert_eq!((fp(&a, "dup"), fp(&b, "dup")), (a_dup.clone(), b_dup.clone()));
+        assert_eq!(key_clashes(&a), BTreeSet::from(["dup".to_string()]));
+        assert_eq!(pending(&a).unwrap().items, 0, "a clash isn't a change to send");
+        assert!(!sync(&a, &ca).unwrap().uploaded, "nor does it upload again");
+        // Once A's own is gone, A gets B's.
+        keys::remove(&a, "dup").unwrap();
+        assert_eq!(pending(&a).unwrap().items, 0, "deleting the clashing key deletes nothing elsewhere");
+        sync(&a, &ca).unwrap();
+        assert_eq!(fp(&a, "dup"), b_dup);
+        assert!(key_clashes(&a).is_empty());
+
+        // Deleting a synced key deletes it everywhere.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        keys::remove(&b, "lab").unwrap();
+        sync(&b, &cb).unwrap();
+        sync(&a, &ca).unwrap();
+        assert!(!keys::exists(&a, "lab"));
+
         // Runs from both devices end up everywhere, newest first.
         history::append(&b.history_file(), &run("r2", 200)).unwrap();
         sync(&b, &cb).unwrap();
@@ -905,6 +1048,7 @@ mod tests {
     #[test]
     fn settings_split_by_os() {
         assert!(is_mine("setting:theme"));
+        assert!(is_mine("key:lab"));
         assert!(is_mine(&format!("setting:{}:shell", os())));
         assert!(!is_mine("setting:plan9:shell"));
         assert!(!is_mine("setting:launch_at_login"));

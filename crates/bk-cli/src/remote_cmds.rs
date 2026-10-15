@@ -134,22 +134,27 @@ pub fn go(ctx: &Ctx, lib: &Library, e: &Entry, print: bool, dialect: Dialect) ->
 pub fn ssh(ctx: &Ctx, name: &str, command: &[String]) -> Result<i32> {
     let lib = ctx.library();
     let target = servers::resolve_target(name, &lib.servers)?;
+    let program = ssh_program(&lib);
     let mut args = Vec::new();
     for f in &target.forward {
         args.push("-L".to_string());
         args.push(f.clone());
     }
-    args.extend(remote::session_args(&target, &ctx.paths));
+    args.extend(remote::session_args(&program, &target, &ctx.paths));
     if !command.is_empty() {
         args.push(command.iter().map(|a| render::q(a)).collect::<Vec<_>>().join(" "));
     }
-    exec_ssh(&ssh_program(&lib), &args, &servers::ssh_env(&ctx.env))
+    exec_ssh(&program, &args, &servers::ssh_env(&ctx.env))
 }
 
-fn reach_text(r: &Reach) -> String {
+pub fn reach_text(r: &Reach) -> String {
     match r {
         Reach::Reachable { ms } => style(format!("● reachable ({ms} ms)")).green().to_string(),
-        Reach::AuthRequired => style("● needs a password / key (connect once with `bk ssh`)").yellow().to_string(),
+        Reach::AuthRequired => {
+            style("● needs a password / key (`bk ssh` to log in, `bk keys install` to set up a key)")
+                .yellow()
+                .to_string()
+        }
         Reach::UnknownHostKey => style("● host key not trusted yet (connect once with `bk ssh`)").yellow().to_string(),
         Reach::ChangedHostKey => style("● HOST KEY CHANGED — check ~/.ssh/known_hosts").red().bold().to_string(),
         Reach::Unreachable { reason } => style(format!("● unreachable: {reason}")).red().to_string(),
@@ -222,6 +227,11 @@ fn add(ctx: &Ctx, a: ServerAddArgs) -> Result<i32> {
     };
     store::upsert_server(&ctx.paths.config_file, &a.name, &server)?;
     eprintln!("{} saved server {}", style("✓").green().bold(), style(&a.name).bold());
+    if let Some(key) = server.identity.as_deref().and_then(bk_core::keys::saved_name)
+        && !bk_core::keys::exists(&ctx.paths, key)
+    {
+        eprintln!("  {} no key named `{key}` is saved on this device yet (see `bk keys`)", style("note:").yellow());
+    }
     eprintln!(
         "  connect: {}   check: {}",
         style(format!("bk ssh {}", a.name)).cyan(),
