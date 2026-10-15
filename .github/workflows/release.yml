@@ -1,11 +1,19 @@
 name: Release
 
-# Builds the desktop app and the bk CLI for every platform into a draft GitHub release.
+# Builds the desktop app and the bk CLI for every platform into a draft GitHub release,
+# signed for updates, with the `latest.json` that installed apps and `bk update` read.
 #
 #   - Push a tag that matches the app version:  git tag v0.1.0 && git push origin v0.1.0
 #   - or run it by hand: Actions → Release → Run workflow (uses the version in tauri.conf.json)
 #
-# Review the draft on GitHub, then publish it.
+# Review the draft on GitHub, then publish it: installed copies see it once it's published.
+#
+# Needs two repository secrets, the update signing key and its password
+# (`pnpm tauri signer generate -w ~/.tauri/clibooker.key`):
+#   TAURI_SIGNING_PRIVATE_KEY           the content of ~/.tauri/clibooker.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# Its public half is `plugins.updater.pubkey` in app/src-tauri/tauri.conf.json (and
+# RELEASE_PUBKEY in crates/bk-core/src/update.rs).
 on:
   push:
     tags: ["v*"]
@@ -29,6 +37,20 @@ jobs:
       release_id: ${{ steps.release.outputs.id }}
     steps:
       - uses: actions/checkout@v4
+
+      # Unsigned builds can't update anyone: stop before building them.
+      - name: Signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::the TAURI_SIGNING_PRIVATE_KEY secret isn't set (see the top of release.yml)"
+            exit 1
+          fi
+          if ! jq -e '.plugins.updater.pubkey | length > 0' app/src-tauri/tauri.conf.json >/dev/null; then
+            echo "::error::plugins.updater.pubkey is empty in app/src-tauri/tauri.conf.json"
+            exit 1
+          fi
 
       - id: version
         name: Version
@@ -118,15 +140,20 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Builds the bk sidecar (beforeBuildCommand) and the app, then uploads the installers
-      # to the draft: .dmg, .deb/.rpm/.AppImage, .msi and the NSIS setup .exe.
+      # to the draft: .dmg, .deb/.rpm/.AppImage, .msi and the NSIS setup .exe, each with the
+      # signed update package (`.app.tar.gz` on macOS) and its `.sig`. `latest.json` is
+      # written once at the end (`updater` job): jobs writing it in parallel would race.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app
           tauriScript: pnpm tauri
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.updater.conf.json
           releaseId: ${{ needs.draft.outputs.release_id }}
+          includeUpdaterJson: false
 
   cli:
     name: bk CLI (${{ matrix.target }})
@@ -176,8 +203,88 @@ jobs:
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # `bk update` checks this signature (and that it names this file and version).
+      - name: Sign
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx --yes @tauri-apps/cli@2.12.2 signer sign --app-version "${TAG#v}" "$ASSET"
+
       - name: Upload to the draft
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$TAG" "$ASSET" --clobber
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sig" --clobber
+
+  # What installed apps and `bk update` read: every update package with its signature, each
+  # checked against the public key the apps trust (a mismatch would break everyone's updates).
+  updater:
+    name: latest.json
+    needs: [draft, app, cli]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.draft.outputs.tag }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the release
+        run: |
+          sudo apt-get install -y minisign
+          gh release download "$TAG" --dir assets
+
+      - name: Check every signature
+        run: |
+          jq -r .plugins.updater.pubkey app/src-tauri/tauri.conf.json | base64 -d > release.pub
+          count=0
+          for sig in assets/*.sig; do
+            file=${sig%.sig}
+            base64 -d "$sig" > "$file.minisig"
+            if ! minisign -V -q -p release.pub -m "$file" -x "$file.minisig"; then
+              echo "::error::$(basename "$file") isn't signed with the key in tauri.conf.json"
+              exit 1
+            fi
+            count=$((count + 1))
+          done
+          bk=$(ls assets/bk-*.sig | wc -l)
+          if [ "$bk" -ne 5 ]; then
+            echo "::error::expected 5 signed bk archives, found $bk"
+            exit 1
+          fi
+          echo "$count signatures check out"
+
+      - name: Write latest.json
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          entry() {
+            local file
+            file=$(cd assets && ls $1 2>/dev/null | head -1)
+            if [ -z "$file" ] || [ ! -f "assets/$file.sig" ]; then
+              echo "::error::no signed $1 in the release" >&2
+              return 1
+            fi
+            jq -n --arg url "$base/$file" --arg sig "$(cat "assets/$file.sig")" '{url: $url, signature: $sig}'
+          }
+          mac_arm=$(entry '*aarch64.app.tar.gz')
+          mac_x64=$(entry '*x64.app.tar.gz')
+          appimage=$(entry '*.AppImage')
+          deb=$(entry '*.deb')
+          rpm=$(entry '*.rpm')
+          nsis=$(entry '*-setup.exe')
+          msi=$(entry '*.msi')
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg notes "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson mac_arm "$mac_arm" --argjson mac_x64 "$mac_x64" --argjson appimage "$appimage" \
+            --argjson deb "$deb" --argjson rpm "$rpm" --argjson nsis "$nsis" --argjson msi "$msi" \
+            '{version: $version, notes: $notes, pub_date: $date, platforms: {
+              "darwin-aarch64": $mac_arm, "darwin-aarch64-app": $mac_arm,
+              "darwin-x86_64": $mac_x64, "darwin-x86_64-app": $mac_x64,
+              "linux-x86_64": $appimage, "linux-x86_64-appimage": $appimage,
+              "linux-x86_64-deb": $deb, "linux-x86_64-rpm": $rpm,
+              "windows-x86_64": $nsis, "windows-x86_64-nsis": $nsis, "windows-x86_64-msi": $msi
+            }}' > latest.json
+          cat latest.json
+          gh release upload "$TAG" latest.json --clobber

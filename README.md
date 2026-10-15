@@ -66,6 +66,21 @@ The app bundles `bk`:
 - **macOS and Linux:** **Settings → Command line → Install bk command** links it into `~/.local/bin`. The `.deb`/`.rpm` packages already install it as `/usr/bin/bk`.
 - **Windows:** **Add bk to PATH** adds the app's folder to your user PATH.
 
+### Updates
+
+**The app** says when a new version is out: a toast, **Update to 0.4.0** in the sidebar, and Settings → Updates. **Update and restart** downloads it, installs it, and opens the new version:
+- It looks when it starts and every few hours. Turn that off in Settings → Updates, where **Check now** looks right away.
+- Releases are signed, and the app installs only an update signed with Clibooker's release key.
+- `.deb` and `.rpm` installs ask for your password to install the package.
+- A Mac app opened straight from the downloaded disk image can't replace itself: move it to Applications first.
+- Runs going in the app stop when it restarts; runs kept going on a server (tmux) carry on.
+- Versions before 0.4.0 don't have this yet: install 0.4.0 by hand once.
+
+**The CLI:**
+- `bk update` replaces a `bk` installed from a release archive, after checking its signature.
+- `bk update --check` only says whether there's a new version, and `bk doctor` mentions one too.
+- The `bk` that comes with the app (including `.deb`/`.rpm`) updates with the app. A `cargo install` updates by running it again.
+
 ### Build from source
 
 You need Rust (stable), Node 20+ and pnpm, plus each platform's prerequisites:
@@ -114,6 +129,7 @@ Add `--record` (e.g. `eval "$(bk init zsh --record)"`) to also feed the app's In
 | `bk trust [DIR]` | Approve a project's `.bk.toml` (`--revoke` to withdraw) |
 | `bk export [NAMES] [-o FILE] [--json]` · `bk import FILE [--on-conflict skip\|overwrite\|rename]` | Move bookmarks between machines |
 | `bk app` | Open the desktop app |
+| `bk update [--check]` | Update a standalone `bk` to the newest release |
 | `bk sync` | Sync with your other devices now · `bk sync setup` · `bk sync status` (devices, what's waiting) · `bk sync auto on\|off` · `bk sync forget` |
 | `bk locate NAME [DIR]` | Say where a bookmark's folder is on this device (DIR: the current folder) |
 | `bk folders` | Folders from your other devices and where they are here · `bk folders add SHARED LOCAL` · `bk folders rm SHARED` |
@@ -362,6 +378,22 @@ crates/bk-cli      the `bk` binary, its step runner (also the app's on Windows),
 app/src-tauri      Tauri backend: PTY runs (ConPTY + Job Objects on Windows), palette, tray, file watcher, commands
 app/src            React UI (library, editor, terminal tabs, palette, history, inbox, doctor, settings)
 ```
+
+### Releasing
+
+1. Bump the version in `Cargo.toml`, the crates', `app/package.json` and `app/src-tauri/tauri.conf.json`.
+2. Push a tag: `git tag v0.4.0 && git push origin v0.4.0`. The Release workflow builds every platform into a draft release.
+3. Publish the draft. Installed apps and `bk update` see it from then on.
+
+Builds are signed for updates. That needs two repository secrets, made once:
+
+```sh
+cd app && pnpm tauri signer generate -w ~/.tauri/clibooker.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/clibooker.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+```
+
+The public half (`~/.tauri/clibooker.key.pub`) goes in `plugins.updater.pubkey` in `tauri.conf.json` and in `RELEASE_PUBKEY` (`crates/bk-core/src/update.rs`). Keep the private key safe: without it, installed copies can't be updated.
 
 ## Contributing
 
