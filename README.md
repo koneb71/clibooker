@@ -45,6 +45,7 @@ It comes in two parts that share the same bookmarks file:
 - **Import / export** as TOML or JSON.
 - **Pop-out:** open a bookmark in Terminal, iTerm, Ghostty or Warp, or copy it as a one-liner.
 - **SSH servers:** connect to your servers, run bookmarks on them, forward ports, and keep long jobs running after you disconnect (see below).
+- **SSH keys that follow you:** save a key in Clibooker and it syncs, end-to-end encrypted, with the servers that use it. Make one, put it on a server, and type its passphrase once (see [Saved SSH keys](#saved-ssh-keys)).
 - **Many devices, many OSes:** bookmarks sync between your machines by themselves. Each device says where synced folders are on it, and a bookmark can run a different command on Windows, macOS or Linux (see [Sync between devices](#sync-between-devices)).
 
 ## Install
@@ -117,7 +118,8 @@ Add `--record` (e.g. `eval "$(bk init zsh --record)"`) to also feed the app's In
 | `bk locate NAME [DIR]` | Say where a bookmark's folder is on this device (DIR: the current folder) |
 | `bk folders` | Folders from your other devices and where they are here · `bk folders add SHARED LOCAL` · `bk folders rm SHARED` |
 | `bk ssh SERVER [-- cmd]` | Interactive SSH session (or run one command) |
-| `bk server add NAME user@host [-p PORT] [-i KEY] [-J JUMP] [-L 8888:127.0.0.1:8888] [-o K=V]` | Save a server · `bk server rm NAME` · `bk server unhide NAME` · `bk server scan NAME` |
+| `bk server add NAME user@host [-p PORT] [-i FILE\|key:NAME] [-J JUMP] [-L 8888:127.0.0.1:8888] [-o K=V]` | Save a server · `bk server rm NAME` · `bk server unhide NAME` · `bk server scan NAME` |
+| `bk keys` | Saved SSH keys · `bk keys import FILE [--name N]` · `bk keys new NAME` · `bk keys install NAME SERVER` · `bk keys unlock\|lock NAME` · `bk keys pub NAME` · `bk keys mv OLD NEW` · `bk keys rm NAME` |
 | `bk servers [--check]` | List servers (yours and `~/.ssh/config`) with connection status |
 | `bk add NAME -s SERVER [--cwd ~/proj] [--env conda:x] [-L …] [--detach] 'cmd'` | A bookmark that runs on a server |
 | `bk scan SERVER:~/proj` | Bookmark a remote project's scripts |
@@ -209,13 +211,15 @@ Servers come from Clibooker (`[servers.NAME]` in the global file) plus every hos
 To remove a server, right-click it in the sidebar, use the trash button on its page, or run `bk server rm NAME`:
 - A Clibooker server is deleted.
 - An `~/.ssh/config` host is only hidden from Clibooker's lists (`[settings] hidden_servers`). The file isn't edited, and the host still works by name.
-- Bring a hidden host back with Settings → Hidden servers or `bk server unhide NAME`. Authentication uses your keys and ssh-agent (macOS Keychain and 1Password agents work). Password prompts can be typed into the terminal; Clibooker never stores them.
+- Bring a hidden host back with Settings → Hidden servers or `bk server unhide NAME`.
+
+Authentication uses your keys and ssh-agent (macOS Keychain and 1Password agents work), or a key saved in Clibooker (below). Passwords and passphrases are typed into ssh's own prompts in the terminal; Clibooker never sees or stores them.
 
 ```toml
 [servers.gpu]
 host = "10.0.0.5"
 user = "ubuntu"
-identity = "~/.ssh/lab_ed25519"
+identity = "key:lab"                 # a saved key (below), or a file: "~/.ssh/lab_ed25519"
 jump = "bastion"                     # another server, or user@host[:port]
 forward = ["8888:127.0.0.1:8888"]    # opened with interactive sessions
 
@@ -256,9 +260,20 @@ Safety:
 - Hosts and users are validated.
 - Project `.bk.toml` files can reference servers but not define them, and they still need `bk trust`.
 
+### Saved SSH keys
+
+A server synced to a new device used to arrive with only the path of its key, and the key had to be copied by hand. A key saved in Clibooker travels with it: the server names it as `identity = "key:lab"`.
+
+- **Saving one:** Settings → SSH keys → **Import…** (a file such as `~/.ssh/id_ed25519`, with its `.pub` when it's next to it, or pasted text), or `bk keys import FILE`. **New key…** (`bk keys new NAME`) makes one with `ssh-keygen`. Keys are kept in the data folder's `keys/`, readable only by you, and the original file stays where it is.
+- **Using one:** pick it as a server's private key, or `bk server add NAME user@host -i key:lab`. A server's page offers **Save in Clibooker** for a key file it already uses.
+- **Putting one on a server:** **Set up a key…** on a server that asks for a password, or `bk keys install lab gpu`. You log in once more the way you do now (usually a password, typed into ssh), the key is added to `~/.ssh/authorized_keys` there (like `ssh-copy-id`; any login shell works), and from then on the server uses the key. A check confirms it logs in.
+- **Passphrases:** typed into OpenSSH's own prompts in a terminal tab, never into Clibooker. Once you've typed one, ssh-agent keeps it (and with macOS's own ssh, the Keychain), so you aren't asked again. **Unlock** (`bk keys unlock NAME`) does that ahead of time, so background checks and env discovery can use the key too; **Lock** (`bk keys lock NAME`) forgets it. A server can opt out with the option `AddKeysToAgent = no`.
+- **Before it arrives** on a new device, ssh falls back to your agent and default keys, and doctor says which key is missing.
+- **Jump hosts** get keys from ssh-agent only, so unlock a key the jump host needs.
+
 ## Sync between devices
 
-Keep bookmarks, servers, settings and run history the same on all your machines through a Telegram bot that only you use. There's no server to run, and everything is end-to-end encrypted with your passphrase before it leaves a device.
+Keep bookmarks, servers, SSH keys, settings and run history the same on all your machines through a Telegram bot that only you use. There's no server to run, and everything is end-to-end encrypted with your passphrase before it leaves a device.
 
 1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token.
 2. Run `bk sync setup` (or **Settings → Sync → Set up sync** in the app): paste the token, press **Start** in your bot's chat, and choose a passphrase.
@@ -275,8 +290,12 @@ How it works:
 - **One snapshot:** your bot's chat holds a single pinned, encrypted snapshot (Argon2id + XChaCha20-Poly1305). Each sync downloads it, merges, and uploads a new one if this device had changes.
 - **Merging:** each bookmark, server and setting is merged on its own, and the most recent change wins, deletions included. Run history from all devices is combined.
 - **Settings:** shell, pop-out terminal, ssh program and hotkey are kept separately per OS, so a Windows setting never lands on a Mac. Theme and the rest are shared.
+- **SSH keys** sync like servers, with two exceptions to "newest wins" so that sync can never cost you a key:
+  - It never replaces a *different* key saved under the same name on another device. Each keeps its own, and both say to rename one (`bk keys mv`).
+  - A deletion never removes a key that device hasn't synced yet. Deleting a synced key deletes it everywhere (the app asks first).
+- **Keys without a passphrase** are protected by your sync passphrase alone, and anyone with a device's data folder can read every synced key. Give keys a passphrase (**Add a passphrase** in Settings → SSH keys, or `ssh-keygen -p -f FILE`), and keep a key that must stay on one machine as a file (`identity = "~/.ssh/…"`), which never syncs.
 - **Not synced:** project `.bk.toml` files (they live in their repos), trust approvals, the Inbox, launch-at-login, and [folder mappings](#folders-on-this-device).
-- **Per-OS commands** (`windows = { … }`) sync with their bookmark. A device on an older Clibooker keeps them unless it edits that bookmark itself, so update every device to use them.
+- **Per-OS commands** (`windows = { … }`) sync with their bookmark. A device on an older Clibooker keeps them unless it edits that bookmark itself, so update every device to use them. Saved keys pass through an older device unused; to it `key:lab` is a missing file, so ssh falls back to the agent and default keys.
 - **The bot token and derived key** stay in this device's data folder (`sync/config.json`, readable only by you). The passphrase is never stored, and it can't be recovered.
 
 ### Folders on this device
@@ -302,7 +321,7 @@ Bookmarks files are plain TOML and work on every OS. Paths under your home folde
 | | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | Bookmarks file | `~/.config/bk/bookmarks.toml` | `~/.config/bk/bookmarks.toml` (`$XDG_CONFIG_HOME`) | `%APPDATA%\bk\bookmarks.toml` |
-| History, trust, Inbox | `~/.local/share/bk` | `~/.local/share/bk` (`$XDG_DATA_HOME`) | `%LOCALAPPDATA%\bk` |
+| History, trust, Inbox, saved keys | `~/.local/share/bk` | `~/.local/share/bk` (`$XDG_DATA_HOME`) | `%LOCALAPPDATA%\bk` |
 | Steps run in | `$SHELL` if zsh/bash, else `sh` | same | PowerShell (`pwsh` if installed) |
 | Other step shells | any (`shell = "fish"`) | any | `cmd`, Git Bash (`shell = "bash"`), `powershell` |
 | A POSIX shell that isn't installed | bash, else `sh` | same | Git Bash |
@@ -322,6 +341,8 @@ Known limits:
 - **Linux, GNOME:** the tray icon needs the AppIndicator extension. Without it, closing the window hides the app; open Clibooker again to bring it back, or turn off **Keep running when the window is closed**.
 - **Windows, PowerShell 5.1:** it has no `&&`/`||`. Install PowerShell 7 (`winget install Microsoft.PowerShell`) for steps written that way.
 - **Windows, SSH:** Windows' OpenSSH can't share connections, so server checks and keep-running progress are slower. Step progress for remote runs isn't shown; their exit status is.
+- **Windows, ssh-agent:** it's a service that's off by default, and until it runs a key's passphrase is asked for every time. Settings → SSH keys shows the PowerShell command that starts it. Saved keys rely on `%LOCALAPPDATA%` being private to you; pointed elsewhere with `BK_DATA_DIR`, ssh may refuse them as too open.
+- **Putting a key on a server** needs a POSIX shell and `base64` there (not a Windows server).
 
 ## Development
 
